@@ -43,3 +43,48 @@ def test_maple_repair_with_tools_stays_agentic():
     assert "coding agent" in system.lower()
     assert "tool call" in user.lower()
     assert "Emit ONLY" not in user
+
+
+def test_original_user_text_prefers_primary_task():
+    from compositor.verify.repair import original_user_text
+
+    request = {
+        "messages": [
+            {"role": "user", "content": "Implement HTTP server per plan: add axum, tests, bind 3000."},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "agent"},
+            {"role": "user", "content": "continue"},
+        ]
+    }
+    text = original_user_text(request)
+    assert "Implement HTTP server" in text
+    assert text != "agent"
+
+
+def test_pseudo_markup_repair_keeps_tools_when_present():
+    repair = MaplePreviewRepair()
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Write Cargo.toml with axum using the write tool only.",
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "write", "parameters": {"type": "object"}},
+            }
+        ],
+    }
+    diagnosis = Diagnosis(
+        policy_id="maple_preview.pseudo_tool_markup",
+        field="content",
+        kind="pseudo_tool_markup",
+        onset=0,
+        detail={},
+    )
+    payload = repair.build_payload(request, attempt=1, diagnosis=diagnosis)
+    assert payload.get("tool_choice") != "none"
+    assert payload["tools"]
+    assert "structured tool call" in payload["messages"][1]["content"].lower()

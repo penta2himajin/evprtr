@@ -19,17 +19,50 @@ GENERIC_REPAIR_ID = "generic.fresh_constrained"
 MAPLE_REPAIR_ID = "maple_preview.fresh_constrained"
 
 
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            elif isinstance(block, str) and block.strip():
+                parts.append(block.strip())
+        return "\n".join(parts)
+    return ""
+
+
 def original_user_text(request: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for message in request.get("messages") or []:
+    """Prefer the primary user task, not later short steer/meta user turns.
+
+    Multi-turn agent requests often append brief user messages after tool
+    results. Joining everything diluted the task into noise; taking the
+    longest early user message keeps repair grounded.
+    """
+    candidates: list[tuple[int, int, str]] = []
+    for idx, message in enumerate(request.get("messages") or []):
         if not isinstance(message, dict):
             continue
         if message.get("role") != "user":
             continue
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            parts.append(content.strip())
-    return "\n\n".join(parts) if parts else "(no user text)"
+        text = _message_text(message.get("content"))
+        if not text:
+            continue
+        # Skip tiny placeholders that confused Maple into "(no user text)" loops.
+        if text.lower() in {"agent", "(no user text)", "no user text"}:
+            continue
+        candidates.append((idx, len(text), text))
+    if not candidates:
+        return "(no user text)"
+    # Prefer earliest message among those near-max length (primary prompt).
+    max_len = max(length for _, length, _ in candidates)
+    primary = [c for c in candidates if c[1] >= max(80, int(max_len * 0.6))]
+    pool = primary or candidates
+    pool.sort(key=lambda item: (item[0], -item[1]))
+    return pool[0][2]
 
 
 def request_has_tools(request: dict[str, Any]) -> bool:
@@ -56,7 +89,22 @@ class FreshConstrainedRepair:
     ) -> dict[str, Any]:
         payload = copy.deepcopy(request)
         original = original_user_text(request)
+        agentic = request_has_tools(request)
+
         if diagnosis.kind == "pseudo_tool_markup":
+            if agentic:
+                user = (
+                    "Previous output illegally embedded a <tool_call> / XML-like block "
+                    "inside assistant text instead of using the API tool channel.\n"
+                    "Retry the coding-agent task.\n"
+                    "If you need a tool, emit a real structured tool call only "
+                    "(OpenAI tools). Do not invent markup in the text body.\n"
+                    "Keep reasoning short.\n\n"
+                    f"Task:\n{original}"
+                )
+                return self._apply_messages_and_knobs(
+                    payload, user, attempt, agentic=True
+                )
             user = (
                 "Previous output illegally embedded a <tool_call> block inside assistant text.\n"
                 "Answer again in natural language only.\n"
@@ -71,7 +119,6 @@ class FreshConstrainedRepair:
             payload["tool_choice"] = "none"
             return payload
 
-        agentic = request_has_tools(request)
         if agentic:
             user = (
                 "Previous model output was unusable (repetition, empty answer, or confusion).\n"

@@ -4,32 +4,34 @@
 
 - Maple back on `:8080` (Qwen stopped for VRAM)
 - evprtr path B: `EVPRTR_BUFFER_SIDE_EFFECTS=0`
-- Pi gate + `EVPRTR_PI_AUTO_APPROVE=1` for unattended `-p`
+- Approvals via **Pi RPC + `harness/pi/rpc_bridge.py`** (not `-p` / AUTO_APPROVE)
 - Plan from Qwen in `tinyserve/docs/implementation-plan.md` (bind `:3000`)
 
 ## Commits this session
 
 | Commit | Change |
 |---|---|
-| `2783f3f` | `EVPRTR_PI_AUTO_APPROVE` for path B `-p` |
+| `2783f3f` | `EVPRTR_PI_AUTO_APPROVE` for path B `-p` (**removed** in favor of RPC) |
 | `91cca3c` | Agentic repair when `tools` present (stop “Emit ONLY answer body”) |
+| (pending) | Drop AUTO_APPROVE; add `rpc_bridge.py`; repair primary-task + agentic pseudo-markup; Needle `fallback_maple` reason + query pick |
 
 ## What worked
 
-- Path B auto-approve audited and ran real `bash` (e.g. `ls -la`)
+- Path B gate audited and ran real `bash` under the old AUTO_APPROVE experiment
 - Stream shim + Maple upstream healthy after swap
+- Gate now blocks non-UI (`-p`) and expects TUI or RPC `decide`
 
 ## What blocked implementation
 
-1. **Repair / pseudo-tool loop** still turns coding turns into short prose (`Ready` / `Understood`) when structured tools fail.
-2. **Needle** still `fallback_maple` often.
+1. **Repair / pseudo-tool loop** still turns coding turns into short prose (`Ready` / `Understood`) when structured tools fail — mitigated by agentic repair + primary-task keep.
+2. **Needle** still `fallback_maple` often — now logs `reason` on that phase; query picks last substantial user turn.
 3. **Maple task adherence**: preferred exploratory `bash` / `mkdir` over `write` for Cargo.toml.
-4. **Windows + bash redirects**: heredoc write corrupted `Cargo.toml` (restored).
+4. **Windows + bash redirects**: heredoc write corrupted `Cargo.toml` (restored). Deferred until write/edit path is the active work item.
 5. Occasional Pi requests arrived with **`has_tools: false`** when `--tools` was narrowed.
 
 ## Next improvements (priority)
 
-1. Repair: preserve primary user task across multi-turn; don’t replace with “(no user text)”.
-2. Pseudo-tool repair: when tools are present, convert or re-ask for structured tool_calls instead of `tool_choice=none` + prose-only.
-3. Needle: diagnose empty convert / fallback on Pi schemas.
-4. Gate policy (optional): on Windows, warn/block `bash` file redirects in favor of `write`/`edit`.
+1. ~~Repair: preserve primary user task~~ / ~~pseudo-tool keeps tools when present~~
+2. Drive tinyserve micro-steps through RPC approve loop; watch Needle `reason=` on fallback.
+3. Needle: act on logged skip reasons (convert / query / confidence).
+4. Gate policy (optional, later): on Windows, warn/block `bash` file redirects in favor of `write`/`edit`.

@@ -167,6 +167,7 @@ class Compositor:
                 "ok",
                 phase="fallback_maple",
                 policy_id=self.tool_path.policy_id,
+                reason=getattr(self.tool_path, "last_skip_reason", None),
             )
             return None
         session.event(

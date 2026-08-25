@@ -73,7 +73,18 @@ def needle_calls_to_openai_message(
     }
 
 
+_STUB_USER = frozenset(
+    {"agent", "(no user text)", "no user text", "continue", "ok", "yes", "y"}
+)
+
+
 def last_user_text(messages: list[dict[str, Any]] | None) -> str:
+    """Pick a Needle query from user turns.
+
+    Agent loops often append short steers (``continue``, ``agent``). Prefer the
+    latest substantial user message; if none, fall back to the longest turn
+    instead of joining everything into a diluted query.
+    """
     parts: list[str] = []
     for message in messages or []:
         if not isinstance(message, dict):
@@ -81,9 +92,27 @@ def last_user_text(messages: list[dict[str, Any]] | None) -> str:
         if message.get("role") != "user":
             continue
         content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            parts.append(content.strip())
-    return "\n\n".join(parts) if parts else ""
+        text = ""
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            chunks: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    t = block.get("text")
+                    if isinstance(t, str) and t.strip():
+                        chunks.append(t.strip())
+                elif isinstance(block, str) and block.strip():
+                    chunks.append(block.strip())
+            text = "\n".join(chunks)
+        if text:
+            parts.append(text)
+    if not parts:
+        return ""
+    for text in reversed(parts):
+        if text.lower() not in _STUB_USER and len(text) >= 12:
+            return text
+    return max(parts, key=len)
 
 
 def should_route_tools_to_needle(

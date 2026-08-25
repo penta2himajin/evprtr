@@ -41,22 +41,31 @@ class NeedleToolPath:
         self.runtime = runtime
         self.min_confidence = min_confidence
         self.public_model_id = public_model_id
+        self.last_skip_reason: str | None = None
 
     def enabled_for(self, request: dict[str, Any]) -> bool:
         return should_route_tools_to_needle(request, enabled=self.runtime.available())
 
     def handle(self, request: dict[str, Any]) -> ToolPathResult | None:
         """Return a full chat.completion object, or None to fall back to Maple."""
+        self.last_skip_reason = None
         if not self.enabled_for(request):
+            self.last_skip_reason = "not_enabled"
             return None
 
-        needle_tools = openai_tools_to_needle(request.get("tools"))
+        openai_tools = request.get("tools")
+        raw_count = len(openai_tools) if isinstance(openai_tools, list) else 0
+        needle_tools = openai_tools_to_needle(openai_tools)
         needle_tools = filter_tools_for_choice(needle_tools, request.get("tool_choice"))
         if not needle_tools:
+            self.last_skip_reason = (
+                f"empty_converted_tools raw_count={raw_count}"
+            )
             return None
 
         query = last_user_text(request.get("messages"))
         if not query:
+            self.last_skip_reason = "empty_query"
             return None
 
         result = self.runtime.complete(query, needle_tools)
@@ -66,6 +75,10 @@ class NeedleToolPath:
             and result.function_calls
         ):
             # Low confidence with a call → let Maple try (escalation).
+            self.last_skip_reason = (
+                f"low_confidence conf={result.confidence} "
+                f"min={self.min_confidence} calls={len(result.function_calls)}"
+            )
             return None
 
         choice = request.get("tool_choice", "auto")

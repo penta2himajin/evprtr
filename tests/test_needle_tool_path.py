@@ -143,3 +143,57 @@ def test_tool_path_schema_conflict_required_refuses_without_markup():
     assert "<tool_call" not in content.lower()
     assert "schema-valid" in content.lower() or "required" in content.lower()
     assert result.response["choices"][0]["message"].get("tool_calls") in (None, [])
+
+
+def test_tool_path_skip_reason_empty_converted_tools():
+    class RT(NeedleToolRuntime):
+        def available(self):
+            return True
+
+        def complete(self, query, tools):
+            raise AssertionError("should not call Needle")
+
+    path = NeedleToolPath(RT())
+    result = path.handle(
+        {
+            "messages": [{"role": "user", "content": "do something useful now"}],
+            "tools": [{"type": "function", "function": {}}],  # no name
+            "tool_choice": "auto",
+        }
+    )
+    assert result is None
+    assert path.last_skip_reason is not None
+    assert "empty_converted_tools" in path.last_skip_reason
+
+
+def test_tool_path_skip_reason_empty_query():
+    class RT(NeedleToolRuntime):
+        def available(self):
+            return True
+
+        def complete(self, query, tools):
+            raise AssertionError("should not call Needle")
+
+    path = NeedleToolPath(RT())
+    result = path.handle(
+        {
+            "messages": [{"role": "system", "content": "only system"}],
+            "tools": OPENAI_TOOLS,
+            "tool_choice": "auto",
+        }
+    )
+    assert result is None
+    assert path.last_skip_reason == "empty_query"
+
+
+def test_last_user_text_skips_stub_continue():
+    from compositor.tools.convert import last_user_text
+
+    text = last_user_text(
+        [
+            {"role": "user", "content": "Implement the HTTP server with axum on port 3000."},
+            {"role": "user", "content": "continue"},
+        ]
+    )
+    assert "Implement the HTTP server" in text
+    assert text != "continue"
