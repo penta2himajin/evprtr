@@ -1,0 +1,140 @@
+"""Detectors for structured tool_calls with unusable arguments.
+
+Maple-Preview (and similar small agent models) sometimes emit a real
+``tool_calls`` channel entry whose ``path`` / ``content`` / ``edits`` are
+nonsense (e.g. write path=Tower content=0.5, or edit old==new). Approving
+those is harmful; stripping and repairing keeps the audit loop intact.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from compositor.verify.types import Diagnosis
+
+DEGENERATE_TOOL_ARGS_ID = "maple_preview.degenerate_tool_args"
+
+_CODEISH_SUFFIXES = (
+    ".toml",
+    ".rs",
+    ".py",
+    ".ts",
+    ".js",
+    ".json",
+    ".md",
+    ".txt",
+    ".yml",
+    ".yaml",
+)
+
+
+def _fn_args(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+    name = str(fn.get("name") or call.get("name") or "")
+    raw = fn.get("arguments", call.get("arguments"))
+    if isinstance(raw, dict):
+        return name, raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return name, parsed
+        except json.JSONDecodeError:
+            return name, {}
+    return name, {}
+
+
+def _looks_like_path(path: str) -> bool:
+    if not path or path in {".", ".."}:
+        return False
+    if any(sep in path for sep in ("/", "\\")):
+        return True
+    lower = path.lower()
+    return any(lower.endswith(suf) for suf in _CODEISH_SUFFIXES)
+
+
+class DegenerateToolCallDetector:
+    """Reject structured tool_calls whose arguments cannot be a real edit."""
+
+    policy_id = DEGENERATE_TOOL_ARGS_ID
+
+    def diagnose(
+        self,
+        message: dict[str, Any],
+        *,
+        request: dict[str, Any] | None = None,
+    ) -> Diagnosis | None:
+        del request
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list) or not calls:
+            return None
+
+        for idx, call in enumerate(calls):
+            if not isinstance(call, dict):
+                continue
+            name, args = _fn_args(call)
+            if name == "write":
+                hit = self._write_problem(args)
+                if hit is not None:
+                    return Diagnosis(
+                        policy_id=self.policy_id,
+                        field="tool_calls",
+                        kind="degenerate_tool_args",
+                        onset=idx,
+                        detail={"tool": "write", **hit},
+                    )
+            elif name == "edit":
+                hit = self._edit_problem(args)
+                if hit is not None:
+                    return Diagnosis(
+                        policy_id=self.policy_id,
+                        field="tool_calls",
+                        kind="degenerate_tool_args",
+                        onset=idx,
+                        detail={"tool": "edit", **hit},
+                    )
+        return None
+
+    def _write_problem(self, args: dict[str, Any]) -> dict[str, Any] | None:
+        path = str(args.get("path") or "").strip()
+        content = str(args.get("content") or "")
+        if not _looks_like_path(path):
+            return {"reason": "path_not_filelike", "path": path, "content_len": len(content)}
+        if content.strip() == path.strip():
+            return {"reason": "content_equals_path", "path": path, "content_len": len(content)}
+        lower_path = path.lower().replace("\\", "/")
+        if lower_path.endswith("cargo.toml"):
+            if "[package]" not in content and "axum" not in content and len(content) < 80:
+                return {
+                    "reason": "cargo_toml_too_thin",
+                    "path": path,
+                    "content_len": len(content),
+                }
+        if any(lower_path.endswith(suf) for suf in (".rs", ".toml", ".py", ".ts")):
+            if len(content.strip()) < 12:
+                return {
+                    "reason": "source_content_too_short",
+                    "path": path,
+                    "content_len": len(content),
+                }
+        return None
+
+    def _edit_problem(self, args: dict[str, Any]) -> dict[str, Any] | None:
+        path = str(args.get("path") or "").strip()
+        if path and not _looks_like_path(path):
+            return {"reason": "path_not_filelike", "path": path}
+        edits = args.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return {"reason": "empty_edits", "path": path}
+        for edit in edits:
+            if not isinstance(edit, dict):
+                continue
+            old = str(edit.get("oldText") or edit.get("old_string") or "")
+            new = str(edit.get("newText") or edit.get("new_string") or "")
+            if old and old == new:
+                return {"reason": "noop_edit", "path": path, "old_len": len(old)}
+            if old and len(old) < 80 and "tokio {version" in old.replace(" ", ""):
+                # Seen live: invented oldText that never exists in the file.
+                return {"reason": "invented_old_text", "path": path}
+        return None

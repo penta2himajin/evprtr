@@ -13,6 +13,7 @@ from compositor.verify.detectors_maple_preview import (
     ThinContentDetector,
     strip_pseudo_tool_markup,
 )
+from compositor.verify.detectors_tools import DegenerateToolCallDetector
 from compositor.verify.policy import Detector, RepairStrategy
 from compositor.verify.repair import FreshConstrainedRepair, MaplePreviewRepair
 from compositor.verify.repetition import find_repetition, truncate_before_repetition
@@ -50,6 +51,7 @@ class VerifyBundle:
         return VerifyBundle(
             detectors=[
                 RepetitionDetector(),
+                DegenerateToolCallDetector(),
                 PseudoToolCallInContentDetector(),
                 ThinContentDetector(),
                 EmptyContentLongReasoningDetector(),
@@ -83,6 +85,15 @@ class VerifyBundle:
             raw = message.get("content")
             if isinstance(raw, str):
                 message["content"] = strip_pseudo_tool_markup(raw)
+        elif diagnosis.kind == "degenerate_tool_args":
+            # Drop unusable structured calls so repair can emit a real write/edit.
+            message["tool_calls"] = None
+            if not isinstance(message.get("content"), str) or not str(
+                message.get("content")
+            ).strip():
+                message["content"] = (
+                    "Previous tool call arguments were unusable and were discarded."
+                )
         elif diagnosis.kind not in {"thin_content", "empty_content_long_reasoning"}:
             raw = message.get(diagnosis.field)
             if isinstance(raw, str):

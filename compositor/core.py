@@ -203,11 +203,11 @@ class Compositor:
             session.event("verify", "error", attempt=attempt, **diagnosis.event_detail())
 
             sanitized = self.verify.sanitize(current, diagnosis)
-            # Pseudo tool markup must be repaired, not merely stripped — leftover
-            # "I'll get the weather..." prose still misleads harnesses.
-            if diagnosis.kind != "pseudo_tool_markup" and self.verify.has_usable_content(
-                sanitized, request=request
-            ):
+            # Pseudo markup / degenerate tool args must be repaired, not kept.
+            if diagnosis.kind not in {
+                "pseudo_tool_markup",
+                "degenerate_tool_args",
+            } and self.verify.has_usable_content(sanitized, request=request):
                 session.event(
                     "verify",
                     "ok",

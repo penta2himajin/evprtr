@@ -119,6 +119,23 @@ class FreshConstrainedRepair:
             payload["tool_choice"] = "none"
             return payload
 
+        if diagnosis.kind == "degenerate_tool_args":
+            detail = diagnosis.detail or {}
+            user = (
+                "Previous structured tool call had unusable arguments "
+                f"({detail.get('tool')}: {detail.get('reason')}; "
+                f"path={detail.get('path')!r}, content_len={detail.get('content_len')}).\n"
+                "Retry the coding-agent task.\n"
+                "For file updates prefer the write tool with path + FULL file content "
+                "(valid TOML/Rust source). Do not put the filename in content. "
+                "Do not invent paths like Tower/MIT. Do not use no-op edits.\n"
+                "Keep reasoning short.\n\n"
+                f"Task:\n{original}"
+            )
+            return self._apply_messages_and_knobs(
+                payload, user, attempt, agentic=True
+            )
+
         if agentic:
             user = (
                 "Previous model output was unusable (repetition, empty answer, or confusion).\n"
@@ -195,7 +212,7 @@ class MaplePreviewRepair(FreshConstrainedRepair):
         attempt: int,
         diagnosis: Diagnosis,
     ) -> dict[str, Any]:
-        if diagnosis.kind == "pseudo_tool_markup":
+        if diagnosis.kind in {"pseudo_tool_markup", "degenerate_tool_args"}:
             return super().build_payload(request, attempt=attempt, diagnosis=diagnosis)
 
         if request_has_tools(request):
