@@ -147,6 +147,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         cmd.extend(["--name", args.name])
     if args.no_session:
         cmd.append("--no-session")
+    if args.tools:
+        cmd.extend(["--tools", args.tools])
+    if args.exclude_tools:
+        cmd.extend(["--exclude-tools", args.exclude_tools])
 
     env = os.environ.copy()
     if args.evprtr_base_url:
@@ -170,6 +174,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     buf = b""
     settled = False
     prompt_sent = False
+    reject_count = 0
 
     try:
         # Give RPC a moment to boot, then send the prompt.
@@ -253,14 +258,37 @@ def cmd_run(args: argparse.Namespace) -> int:
                             },
                         )
                     elif method == "confirm":
+                        confirmed = bool(decision.get("confirmed"))
                         _send(
                             proc,
                             {
                                 "type": "extension_ui_response",
                                 "id": req_id,
-                                "confirmed": bool(decision.get("confirmed")),
+                                "confirmed": confirmed,
                             },
                         )
+                        if not confirmed:
+                            reject_count += 1
+                            if args.max_rejects and reject_count >= args.max_rejects:
+                                print(
+                                    "RPC_BRIDGE: abort after "
+                                    f"{reject_count} rejected confirms "
+                                    "(max-rejects)",
+                                    flush=True,
+                                )
+                                _set_status(
+                                    state,
+                                    phase="aborted_rejects",
+                                    reject_count=reject_count,
+                                )
+                                try:
+                                    _send(proc, {"type": "abort"})
+                                except Exception:
+                                    pass
+                                settled = False
+                                break
+                        else:
+                            reject_count = 0
                     elif method == "select":
                         _send(
                             proc,
@@ -285,6 +313,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                         f"RPC_BRIDGE: decision applied id={req_id} {dumped}",
                         flush=True,
                     )
+                    if state.joinpath("status.json").is_file():
+                        st = _read_json(state / "status.json")
+                        if st.get("phase") == "aborted_rejects":
+                            break
                     continue
 
                 if et == "tool_execution_start":
@@ -305,6 +337,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # Agent finished turn; exit cleanly after brief drain.
                 time.sleep(0.3)
                 break
+            st_path = state / "status.json"
+            if st_path.is_file():
+                try:
+                    if _read_json(st_path).get("phase") == "aborted_rejects":
+                        break
+                except json.JSONDecodeError:
+                    pass
 
     finally:
         if proc.poll() is None:
@@ -410,12 +449,26 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--name")
     run.add_argument("--no-session", action="store_true")
     run.add_argument("--fresh-state", action="store_true")
+    run.add_argument(
+        "--tools",
+        help="Pass through to pi --tools (comma-separated allowlist)",
+    )
+    run.add_argument(
+        "--exclude-tools",
+        help="Pass through to pi --exclude-tools",
+    )
     run.add_argument("--evprtr-base-url", default="http://127.0.0.1:8741")
     run.add_argument(
         "--decision-timeout",
         type=float,
         default=None,
         help="Seconds to wait for each decide (default: forever)",
+    )
+    run.add_argument(
+        "--max-rejects",
+        type=int,
+        default=12,
+        help="Abort after this many rejected gated confirms in one run (0=never)",
     )
     run.set_defaults(func=cmd_run)
 
