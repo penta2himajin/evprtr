@@ -17,7 +17,7 @@ Recommended when operating evprtr as a **normal coding agent** behind Pi:
 | Tools | Behavior |
 |---|---|
 | `read`, `grep`, `find`, `ls` | Passthrough (no prompt) |
-| `bash`, `powershell`, `write`, `edit` | Confirm in TUI/RPC; blocked in `-p` / JSON (no UI) |
+| `bash`, `powershell`, `write`, `edit` | Confirm in TUI/RPC; blocked in `-p` / JSON unless `EVPRTR_PI_AUTO_APPROVE=1` |
 
 Approved calls execute via **Pi’s built-in tools** (same agent loop, results return to the model). Optional audit posts to `POST /v1/approvals` when the compositor is reachable (`EVPRTR_BASE_URL`, default `http://127.0.0.1:8741`).
 

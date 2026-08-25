@@ -8,8 +8,9 @@
  * Gated: bash, powershell, write, edit
  *
  * Interactive (TUI/RPC): confirm dialog; on Yes the built-in tool runs.
- * Print/JSON (-p): side-effect tools are blocked (no UI). Prefer read-only
- * tools for unattended plan turns.
+ * Print/JSON (-p): side-effect tools are blocked (no UI), unless experimental
+ * auto-approve is enabled:
+ *   set EVPRTR_PI_AUTO_APPROVE=1
  *
  * Optional audit: when EVPRTR_BASE_URL is set (default http://127.0.0.1:8741),
  * each gated call is enqueued at POST /v1/approvals and then approve/reject
@@ -30,6 +31,12 @@ const PASSTHROUGH = new Set(["read", "grep", "find", "ls"]);
 
 function baseUrl(): string {
 	return (process.env.EVPRTR_BASE_URL || "http://127.0.0.1:8741").replace(/\/$/, "");
+}
+
+/** Experimental: unattended -p runs may execute gated tools without a UI prompt. */
+function autoApproveEnabled(): boolean {
+	const v = (process.env.EVPRTR_PI_AUTO_APPROVE || "").toLowerCase();
+	return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
 function previewInput(toolName: string, input: Record<string, unknown>): string {
@@ -112,6 +119,14 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		if (!ctx.hasUI) {
+			if (autoApproveEnabled()) {
+				await decideAudit(
+					actionId,
+					true,
+					`auto-approved via EVPRTR_PI_AUTO_APPROVE (${summary.slice(0, 120)})`,
+				);
+				return undefined;
+			}
 			await decideAudit(
 				actionId,
 				false,
@@ -121,7 +136,7 @@ export default function (pi: ExtensionAPI) {
 				block: true,
 				reason:
 					`Side-effect tool "${name}" blocked by evprtr Pi gate (no UI). ` +
-					`Use read/grep/find/ls, or run interactively to approve. ` +
+					`Use read/grep/find/ls, run interactively, or set EVPRTR_PI_AUTO_APPROVE=1. ` +
 					(actionId ? `approval=${actionId}` : "audit unreachable"),
 			};
 		}
