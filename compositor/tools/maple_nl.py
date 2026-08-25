@@ -145,44 +145,96 @@ def needle_retry_instruction(
     maple_nl: str,
     user_task: str,
     tool_names: list[str],
-    limit: int = 800,
+    limit: int = 160,
 ) -> str:
     """Second-chance Needle query after Maple NL → Needle abstains or misfires.
 
-    Soft ``user_task_instruction`` retries often worsened live failures (phone-call
-    / missing-write rationales). Prefer an allowlisted, imperative brief that
-    keeps a short planner note. Explicit create-file tasks keep the proven
-    ``Call write. path=...`` shape.
+    Needle 2 uses a 256-token sliding window with tools pinned as sinks; official
+    examples are short imperatives (``Call ls. path="."``), not essays. Soft
+    user-task briefs and long “do not invent write/sms” lists made live abstains
+    worse. Keep create-file on the proven ``Call write. path=...`` shape.
     """
     task = (user_task or "").strip()
     if parse_create_file(task) is not None:
-        return user_task_instruction(task, limit=limit)
+        return user_task_instruction(task, limit=max(limit, 400))
 
     names = [str(n) for n in tool_names if n]
-    allow = ", ".join(names) if names else "(none)"
-    # Drop tools that are not on the allowlist from the "do not invent" hint.
-    forbidden_bits = ["phone call", "sms"]
-    if "write" not in names:
-        forbidden_bits.append("write")
-    if "edit" not in names:
-        forbidden_bits.append("edit")
-    forbid = ", ".join(forbidden_bits)
+    if not names:
+        return "Call the needed tool now."[:limit]
 
     nl = (maple_nl or "").strip()
-    if len(nl) > 360:
-        nl = nl[:360].rstrip() + "…"
-    task_bit = task[:360] if task else ""
+    chosen = _retry_pick_tool(nl, names)
+    path = _retry_pick_path(nl)
 
-    parts = [
-        "Emit one structured tool call now. Do not explain. Do not refuse.",
-        f"Tool name must be one of: {allow}.",
-        f"Do not invent tools such as {forbid}.",
-    ]
-    if nl:
-        parts.append(f"Planner note:\n{nl}")
-    if task_bit:
-        parts.append(f"User task:\n{task_bit}")
-    return "\n".join(parts)[:limit]
+    if chosen == "ls":
+        ls_path = path or "."
+        # A bare filename in a list+read plan belongs to read, not ls.
+        if re.search(r"\.\w{1,12}$", ls_path) and "/" not in ls_path and "\\" not in ls_path:
+            ls_path = "."
+        return f'Call ls. path="{ls_path}"'[:limit]
+    if chosen == "read":
+        return f'Call read. path="{path or "README.md"}"'[:limit]
+    if chosen == "grep":
+        pat = _retry_pick_grep_pattern(nl) or (path or "TODO")
+        return f'Call grep. pattern="{pat}"'[:limit]
+    if chosen == "find":
+        return f'Call find. pattern="{path or "*"}"'[:limit]
+    if chosen == "write" and path:
+        return f'Call write. path="{path}"'[:limit]
+    if chosen == "edit" and path:
+        return f'Call edit. path="{path}"'[:limit]
+
+    # Generic: one short imperative naming the allowlisted tool only.
+    hint = re.sub(r"\s+", " ", nl.splitlines()[0] if nl else "").strip()[:64]
+    if hint:
+        return f"Call {chosen}. {hint}"[:limit]
+    return f"Call {chosen}."[:limit]
+
+
+_PATH_IN_NL = re.compile(
+    r"""(?ix)
+    (?:path\s*[=:]\s*|file\s*[=:]\s*)[`'"]?([\w./\\-]+\.\w{1,12})
+    | [`'"]([\w./\\-]+\.\w{1,12})[`'"]
+    | \b([\w./-]+\.(?:md|txt|py|ts|tsx|js|json|toml|yml|yaml|rs|go))\b
+    """
+)
+
+
+def _retry_pick_tool(maple_nl: str, names: list[str]) -> str:
+    """Prefer the first allowlisted tool name that appears in the NL text."""
+    lower = (maple_nl or "").lower()
+    hits: list[tuple[int, str]] = []
+    for name in names:
+        match = re.search(rf"\b{re.escape(name.lower())}\b", lower)
+        if match:
+            hits.append((match.start(), name))
+    if hits:
+        hits.sort(key=lambda item: item[0])
+        return hits[0][1]
+    for preferred in ("ls", "read", "grep", "find", "write", "edit", "bash"):
+        if preferred in names:
+            return preferred
+    return names[0]
+
+
+def _retry_pick_path(maple_nl: str) -> str | None:
+    match = _PATH_IN_NL.search(maple_nl or "")
+    if not match:
+        return None
+    for g in match.groups():
+        if g:
+            return g.strip().strip("`\"'")
+    return None
+
+
+def _retry_pick_grep_pattern(maple_nl: str) -> str | None:
+    match = re.search(
+        r"(?i)(?:pattern|query|search(?:\s+for)?)\s*[=:]\s*[`'\"]?([^\s`'\"]+)",
+        maple_nl or "",
+    )
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def align_create_file_tool_calls(response: dict[str, Any], user_task: str) -> dict[str, Any]:

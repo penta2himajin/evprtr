@@ -36,12 +36,7 @@ def test_planned_tool_calls_multi_chunk():
 
 
 def test_extract_fenced_files():
-    text = (
-        "Please write Cargo.toml:\n"
-        "```Cargo.toml\n"
-        '[package]\nname = "tinyserve"\n'
-        "```\n"
-    )
+    text = 'Please write Cargo.toml:\n```Cargo.toml\n[package]\nname = "tinyserve"\n```\n'
     files = extract_fenced_files(text)
     assert files
     assert files[0][0] == "Cargo.toml"
@@ -66,27 +61,42 @@ def test_prepare_needle_instruction_falls_back_on_degenerate():
     from compositor.tools.maple_nl import prepare_needle_instruction
 
     bad = "smoke-smoke-smoke-" * 200
-    out = prepare_needle_instruction(
-        bad, user_task="Create file x.txt with content hi"
-    )
+    out = prepare_needle_instruction(bad, user_task="Create file x.txt with content hi")
     assert "Create file x.txt" in out
     assert len(out) < len(bad)
 
 
-def test_needle_retry_instruction_allowlists_tools_and_keeps_planner_note():
+def test_needle_retry_instruction_is_short_imperative_like_official_examples():
     from compositor.tools.maple_nl import needle_retry_instruction
 
     out = needle_retry_instruction(
-        maple_nl="List the repo root with ls, then read README.md",
+        maple_nl=(
+            "List the repo root with ls, then read README.md\n"
+            "Also explain the project afterwards in detail.\n"
+        ),
         user_task="このリポジトリの内容を調べて",
         tool_names=["read", "ls", "grep", "find"],
     )
-    assert "Tool name must be one of: read, ls, grep, find" in out
-    assert "write" in out  # forbidden when not allowlisted
-    assert "phone call" in out
-    assert "Planner note:" in out
-    assert "List the repo root" in out
-    assert "Call the needed tools now" not in out
+    assert out.startswith("Call ls.")
+    assert "path=" in out
+    assert "phone" not in out.lower()
+    assert "Do not invent" not in out
+    assert "Planner note:" not in out
+    assert "User task:" not in out
+    assert "sms" not in out.lower()
+    assert len(out) < 120
+
+
+def test_needle_retry_instruction_picks_read_when_named_in_nl():
+    from compositor.tools.maple_nl import needle_retry_instruction
+
+    out = needle_retry_instruction(
+        maple_nl='Read path="README.md" for the overview',
+        user_task="調べて",
+        tool_names=["read", "ls", "grep"],
+    )
+    assert out.startswith("Call read.")
+    assert "README.md" in out
 
 
 def test_needle_retry_instruction_keeps_create_file_shape():
@@ -114,10 +124,7 @@ async def test_maple_nl_then_needle(tmp_path):
                         "message": {
                             "role": "assistant",
                             "content": (
-                                "Use write on Cargo.toml:\n"
-                                "```Cargo.toml\n"
-                                'axum = "0.7"\n'
-                                "```\n"
+                                'Use write on Cargo.toml:\n```Cargo.toml\naxum = "0.7"\n```\n'
                             ),
                         }
                     }
@@ -222,12 +229,7 @@ async def test_needle_corrects_degenerate_write(tmp_path):
 
         def complete(self, query, tools, *, max_new_tokens=None):
             q = query.lower()
-            if (
-                "unusable" in q
-                or "failed tool" in q
-                or "call write" in q
-                or "cargo.toml" in q
-            ):
+            if "unusable" in q or "failed tool" in q or "call write" in q or "cargo.toml" in q:
                 return NeedleCompleteResult(
                     function_calls=[
                         {
@@ -280,9 +282,7 @@ async def test_needle_corrects_degenerate_write(tmp_path):
         }
     )
     # NL→Needle abstains → Maple tools emits Tower → correct to Cargo.toml
-    args = result.response["choices"][0]["message"]["tool_calls"][0]["function"][
-        "arguments"
-    ]
+    args = result.response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
     if isinstance(args, str):
         args = json.loads(args)
     assert args["path"] == "Cargo.toml"
@@ -392,9 +392,7 @@ async def test_nl_retries_on_degenerate_write(tmp_path):
         }
     )
     assert rt.n >= 2
-    args = result.response["choices"][0]["message"]["tool_calls"][0]["function"][
-        "arguments"
-    ]
+    args = result.response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
     if isinstance(args, str):
         args = json.loads(args)
     assert args["path"] == "live-nl-retry.txt"
@@ -435,7 +433,7 @@ async def test_nl_empty_call_retry_uses_allowlisted_brief(tmp_path):
 
         def complete(self, query, tools, *, max_new_tokens=None):
             self.queries.append(query)
-            if "Tool name must be one of:" in query and "ls" in query:
+            if query.startswith("Call ls."):
                 return NeedleCompleteResult(
                     function_calls=[{"name": "ls", "arguments": {"path": "."}}],
                     confidence=0.9,
@@ -486,13 +484,11 @@ async def test_nl_empty_call_retry_uses_allowlisted_brief(tmp_path):
         }
     )
     assert len(rt.queries) >= 2
-    assert "Tool name must be one of: ls, read" in rt.queries[1]
-    assert "phone call" in rt.queries[1]
+    assert rt.queries[1].startswith("Call ls.")
+    assert "phone" not in rt.queries[1].lower()
+    assert "Do not invent" not in rt.queries[1]
     assert result.response["choices"][0]["finish_reason"] == "tool_calls"
-    assert (
-        result.response["choices"][0]["message"]["tool_calls"][0]["function"]["name"]
-        == "ls"
-    )
+    assert result.response["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "ls"
     phases = [
         e.detail.get("phase")
         for e in result.trace.events
@@ -513,11 +509,7 @@ async def test_missing_mutation_read_then_correct_write(tmp_path):
     class Maple:
         async def chat_completions(self, payload):
             if payload.get("tool_choice") == "none":
-                return {
-                    "choices": [
-                        {"message": {"role": "assistant", "content": "hmm"}}
-                    ]
-                }
+                return {"choices": [{"message": {"role": "assistant", "content": "hmm"}}]}
             return {
                 "choices": [
                     {
@@ -530,9 +522,7 @@ async def test_missing_mutation_read_then_correct_write(tmp_path):
                                     "type": "function",
                                     "function": {
                                         "name": "read",
-                                        "arguments": json.dumps(
-                                            {"path": "notes.txt"}
-                                        ),
+                                        "arguments": json.dumps({"path": "notes.txt"}),
                                     },
                                 }
                             ],
