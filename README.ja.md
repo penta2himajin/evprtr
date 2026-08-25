@@ -35,9 +35,26 @@ pytest
 | パス | 役割 |
 |---|---|
 | `compositor/` | composite layer 本体（API + オーケストレーション） |
+| `harness/pi/` | **Path B** — Pi 副作用ゲート + RPC 承認ブリッジ |
 | `tests/` | TDD スイート |
 | `docs/architecture.md` | 層・命名・境界 |
 | `docs/overview.md` | 短い概要 |
+
+## Path B（Pi RPC 承認）— 他環境向け
+
+AUTO_APPROVE なしで Pi 配下のコーディングエージェントを回す場合:
+
+1. Quick start どおり compositor を起動。`EVPRTR_BUFFER_SIDE_EFFECTS=0`。
+2. Pi の upstream を `http://127.0.0.1:8741/v1`（model id `evprtr`）に向ける。
+3. `write` / `edit` / `bash` の承認は:
+
+```powershell
+python harness/pi/rpc_bridge.py run --cwd <project> --state-dir <project>/.evprtr/pi-rpc --fresh-state --provider evprtr --model evprtr --prompt-file <prompt.txt>
+python harness/pi/rpc_bridge.py pending --state-dir <project>/.evprtr/pi-rpc
+python harness/pi/rpc_bridge.py decide --state-dir <project>/.evprtr/pi-rpc --id <uuid> --approve
+```
+
+詳細・rewrite 抑制・ツール方針は [`harness/pi/README.md`](./harness/pi/README.md)。
 
 ## ライセンス
 

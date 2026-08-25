@@ -34,9 +34,26 @@ pytest
 | Path | Role |
 |---|---|
 | `compositor/` | Composite layer package (API + orchestration) |
+| `harness/pi/` | **Path B** — Pi side-effect gate + RPC approval bridge |
 | `tests/` | TDD suite |
 | `docs/architecture.md` | Layers, naming, boundaries |
 | `docs/overview.md` | Short user-facing intro |
+
+## Path B (Pi RPC approvals) — other machines
+
+Use this when running a normal coding agent behind Pi without AUTO_APPROVE:
+
+1. Install deps / start compositor (see Quick start). Set `EVPRTR_BUFFER_SIDE_EFFECTS=0`.
+2. Point Pi at `http://127.0.0.1:8741/v1` (model id `evprtr`).
+3. Drive gated `write` / `edit` / `bash` confirms with:
+
+```powershell
+python harness/pi/rpc_bridge.py run --cwd <project> --state-dir <project>/.evprtr/pi-rpc --fresh-state --provider evprtr --model evprtr --prompt-file <prompt.txt>
+python harness/pi/rpc_bridge.py pending --state-dir <project>/.evprtr/pi-rpc
+python harness/pi/rpc_bridge.py decide --state-dir <project>/.evprtr/pi-rpc --id <uuid> --approve
+```
+
+Details, rewrite-loop suppression, and tool policy: [`harness/pi/README.md`](./harness/pi/README.md).
 
 ## License
 
