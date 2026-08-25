@@ -66,18 +66,26 @@ Near-term target remains Maple-Preview; mid-term other small models should add/r
 
 ## Needle 2 tool path
 
-When the request includes `tools` and `tool_choice` is not `none`, the compositor may route **tool determination** to Needle 2 (`needle2.tool_path`) instead of Maple:
+When the request includes `tools` and `tool_choice` is not `none`, the compositor may route **tool determination** to Needle 2 (`needle2.tool_path`).
+
+Default bridge (peelable via env):
+
+1. **Maple NL → Needle** (`EVPRTR_NEEDLE_VIA_MAPLE_NL=1`): Maple answers with natural-language tool instructions (`tool_choice=none`); Needle structures them into OpenAI `tool_calls`.
+2. **Chunked writes** (`EVPRTR_NEEDLE_CHUNK_WRITES=1`): if Maple NL includes a fenced file body, the compositor splits it and emits write+edit sentinel steps (Needle probed; deterministic plan as fallback).
+3. **Degenerate correction** (`EVPRTR_NEEDLE_CORRECT_DEGENERATE=1`): if Maple/Needle emits unusable write/edit args, Needle gets a correction instruction before Maple prose repair.
 
 | Outcome | Behaviour |
 |---|---|
 | `function_calls` non-empty | OpenAI-shaped `tool_calls` response (`finish_reason=tool_calls`) |
-| Empty call `[]` | Structured prose refusal (no `<tool_call>` markup) — covers schema conflicts / no matching tool |
-| `tool_choice=none` | Needle skipped; Maple + pseudo-markup verify still apply |
-| Needle unavailable / low confidence | Fall back to Maple |
+| Empty call `[]` under auto | Fall back (do not kill the agent loop with a refusal) |
+| `tool_choice=none` | Needle skipped for that Maple NL pass only |
+| Needle unavailable | Fall back to Maple-with-tools |
+
+`EVPRTR_NEEDLE_MAX_NEW_TOKENS` (default `1024`) raises Needle’s generation budget above the engine default of 256.
 
 Engine default path on the author machine: `F:/LLM/models/needle2/libneedle.dll` (`EVPRTR_NEEDLE_LIB_PATH` / `NEEDLE_LIB_PATH`). Disable with `EVPRTR_NEEDLE_ENABLED=0`.
 
-Trace stage: `tool_select`. Summary flags: `needle_tool_path`, `needle_empty_call`, `needle_confidence`.
+Trace stage: `tool_select` (`maple_nl_start` / `maple_nl_done` / `done` / `fallback_maple`). Summary: `needle_tool_path`, `needle_via`, `needle_empty_call`, `needle_confidence`.
 
 ## Side-effect control
 

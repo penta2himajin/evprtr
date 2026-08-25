@@ -31,6 +31,8 @@ async def test_compositor_uses_needle_for_tools(tmp_path: Path):
         _MapleUnused(),
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(RT()),
+        needle_via_maple_nl=False,
+        needle_correct_degenerate=False,
     )
     result = await c.chat_completions(
         {

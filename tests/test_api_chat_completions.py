@@ -107,9 +107,12 @@ async def test_stream_shim_returns_sse_from_full_completion(client):
 
 
 @pytest.mark.asyncio
-async def test_missing_upstream_returns_502_with_trace(tmp_path):
+async def test_missing_upstream_returns_502_with_trace(tmp_path, monkeypatch):
     from compositor.trace import TraceStore
 
+    monkeypatch.delenv("EVPRTR_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.delenv("EVPRTR_NEEDLE_ENABLED", raising=False)
+    monkeypatch.setenv("EVPRTR_NEEDLE_ENABLED", "0")
     app = build_app(traces=TraceStore(tmp_path))
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

@@ -50,10 +50,19 @@ class NeedleToolRuntime:
             return False
         return os.path.isfile(self.lib_path)
 
-    def complete(self, query: str, tools: list[dict[str, Any]]) -> NeedleCompleteResult:
+    def complete(
+        self,
+        query: str,
+        tools: list[dict[str, Any]],
+        *,
+        max_new_tokens: int | None = None,
+    ) -> NeedleCompleteResult:
         agent = self._agent_for(tools)
         agent.reset()
-        raw = agent.complete(query)
+        tokens = max_new_tokens
+        if tokens is None:
+            tokens = int(os.environ.get("EVPRTR_NEEDLE_MAX_NEW_TOKENS", "1024") or "1024")
+        raw = agent.complete(query, max_new_tokens=max(64, tokens))
         calls = raw.get("function_calls") or []
         if not isinstance(calls, list):
             calls = []
