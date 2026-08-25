@@ -2,15 +2,15 @@
  * evprtr side-effect gate for Pi (path B)
  *
  * Lets the model call tools freely through the normal Pi agent loop, but
- * requires human confirmation before executing side-effect tools.
+ * requires confirmation before executing side-effect tools.
  *
  * Passthrough (no prompt): read, grep, find, ls
  * Gated: bash, powershell, write, edit
  *
- * Interactive (TUI/RPC): confirm dialog; on Yes the built-in tool runs.
- * Print/JSON (-p): side-effect tools are blocked (no UI), unless experimental
- * auto-approve is enabled:
- *   set EVPRTR_PI_AUTO_APPROVE=1
+ * Interactive (TUI) or RPC (`ctx.hasUI`): confirm dialog; on Yes the built-in
+ * tool runs. Drive RPC confirms with `harness/pi/rpc_bridge.py`.
+ *
+ * Print/JSON (`-p`, no UI): side-effect tools are blocked.
  *
  * Optional audit: when EVPRTR_BASE_URL is set (default http://127.0.0.1:8741),
  * each gated call is enqueued at POST /v1/approvals and then approve/reject
@@ -20,7 +20,8 @@
  *   set EVPRTR_BUFFER_SIDE_EFFECTS=0
  *
  * Usage:
- *   pi -e path/to/evprtr-side-effect-gate.ts --provider evprtr --model evprtr
+ *   pi -e path/to/evprtr-side-effect-gate.ts --mode rpc --provider evprtr --model evprtr
+ *   python harness/pi/rpc_bridge.py run --cwd <repo> --prompt "..."
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -31,12 +32,6 @@ const PASSTHROUGH = new Set(["read", "grep", "find", "ls"]);
 
 function baseUrl(): string {
 	return (process.env.EVPRTR_BASE_URL || "http://127.0.0.1:8741").replace(/\/$/, "");
-}
-
-/** Experimental: unattended -p runs may execute gated tools without a UI prompt. */
-function autoApproveEnabled(): boolean {
-	const v = (process.env.EVPRTR_PI_AUTO_APPROVE || "").toLowerCase();
-	return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
 function previewInput(toolName: string, input: Record<string, unknown>): string {
@@ -119,14 +114,6 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		if (!ctx.hasUI) {
-			if (autoApproveEnabled()) {
-				await decideAudit(
-					actionId,
-					true,
-					`auto-approved via EVPRTR_PI_AUTO_APPROVE (${summary.slice(0, 120)})`,
-				);
-				return undefined;
-			}
 			await decideAudit(
 				actionId,
 				false,
@@ -136,7 +123,7 @@ export default function (pi: ExtensionAPI) {
 				block: true,
 				reason:
 					`Side-effect tool "${name}" blocked by evprtr Pi gate (no UI). ` +
-					`Use read/grep/find/ls, run interactively, or set EVPRTR_PI_AUTO_APPROVE=1. ` +
+					`Use TUI, or drive RPC confirms via harness/pi/rpc_bridge.py. ` +
 					(actionId ? `approval=${actionId}` : "audit unreachable"),
 			};
 		}
@@ -147,10 +134,10 @@ export default function (pi: ExtensionAPI) {
 			`${summary}\n\nAllow this side-effect tool to run in the Pi harness?`;
 		const ok = await ctx.ui.confirm(title, body);
 		if (ok) {
-			await decideAudit(actionId, true, "approved in Pi UI; executed by harness");
+			await decideAudit(actionId, true, "approved via Pi UI/RPC; executed by harness");
 			return undefined;
 		}
-		await decideAudit(actionId, false, "rejected in Pi UI");
-		return { block: true, reason: `Blocked by user (evprtr Pi gate)${actionId ? ` ${actionId}` : ""}` };
+		await decideAudit(actionId, false, "rejected via Pi UI/RPC");
+		return { block: true, reason: `Blocked by supervisor (evprtr Pi gate)${actionId ? ` ${actionId}` : ""}` };
 	});
 }

@@ -85,7 +85,7 @@ Two peelable approaches (do not enable both for the same Pi run):
 
 ### Path B (recommended for normal Pi agent loops)
 
-Gate execution inside the harness with [`harness/pi/evprtr-side-effect-gate.ts`](../harness/pi/evprtr-side-effect-gate.ts). Set `EVPRTR_BUFFER_SIDE_EFFECTS=0` so `tool_calls` reach Pi. `read` / `grep` / `find` / `ls` pass; `bash` / `write` / `edit` / `powershell` require confirmation (blocked in non-interactive `-p`). Audit via `POST /v1/approvals`. See [`harness/pi/README.md`](../harness/pi/README.md).
+Gate execution inside the harness with [`harness/pi/evprtr-side-effect-gate.ts`](../harness/pi/evprtr-side-effect-gate.ts). Set `EVPRTR_BUFFER_SIDE_EFFECTS=0` so `tool_calls` reach Pi. `read` / `grep` / `find` / `ls` pass; `bash` / `write` / `edit` / `powershell` require confirmation via TUI or [`harness/pi/rpc_bridge.py`](../harness/pi/rpc_bridge.py) (Pi `--mode rpc`). Audit via `POST /v1/approvals`. See [`harness/pi/README.md`](../harness/pi/README.md).
 
 ### Path A (compositor response buffer)
 
