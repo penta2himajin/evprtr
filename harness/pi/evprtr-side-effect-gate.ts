@@ -43,12 +43,21 @@ function previewInput(toolName: string, input: Record<string, unknown>): string 
 		if (toolName === "write") {
 			const path = String(input.path ?? "");
 			const content = String(input.content ?? "");
-			return `path=${path} content_len=${content.length}`;
+			const head = content.length > 280 ? `${content.slice(0, 277)}...` : content;
+			return `path=${path} content_len=${content.length}\n---\n${head}`;
 		}
 		if (toolName === "edit") {
 			const path = String(input.path ?? "");
-			const edits = Array.isArray(input.edits) ? input.edits.length : 0;
-			return `path=${path} edits=${edits}`;
+			const edits = Array.isArray(input.edits) ? input.edits : [];
+			const parts = edits.slice(0, 3).map((raw, i) => {
+				const e = (raw ?? {}) as Record<string, unknown>;
+				const oldText = String(e.oldText ?? e.old_string ?? "");
+				const newText = String(e.newText ?? e.new_string ?? "");
+				const clip = (s: string) => (s.length > 120 ? `${s.slice(0, 117)}...` : s);
+				return `#${i} old=${JSON.stringify(clip(oldText))} new=${JSON.stringify(clip(newText))}`;
+			});
+			const more = edits.length > 3 ? `\n(+${edits.length - 3} more)` : "";
+			return `path=${path} edits=${edits.length}\n${parts.join("\n")}${more}`;
 		}
 		return JSON.stringify(input).slice(0, 500);
 	} catch {
