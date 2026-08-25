@@ -108,6 +108,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     (state / "decisions").mkdir(parents=True, exist_ok=True)
     (state / "events.jsonl").write_text("", encoding="utf-8")
 
+    prompt = args.prompt
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).resolve().read_text(encoding="utf-8")
+    if not prompt or not str(prompt).strip():
+        print("provide --prompt or --prompt-file", file=sys.stderr)
+        return 2
+    args.prompt = str(prompt)
+
     ext = Path(args.extension).resolve() if args.extension else _default_ext()
     if not ext.is_file():
         print(f"extension missing: {ext}", file=sys.stderr)
@@ -389,7 +397,11 @@ def main(argv: list[str] | None = None) -> int:
 
     run = sub.add_parser("run", help="Spawn pi --mode rpc and serve approval stalls")
     run.add_argument("--cwd", required=True)
-    run.add_argument("--prompt", required=True)
+    run.add_argument("--prompt")
+    run.add_argument(
+        "--prompt-file",
+        help="Read prompt text from a UTF-8 file (avoids shell quoting issues)",
+    )
     run.add_argument("--state-dir")
     run.add_argument("--extension")
     run.add_argument("--provider", default="evprtr")

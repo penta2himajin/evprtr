@@ -16,7 +16,9 @@ python harness/pi/rpc_bridge.py run `
   --state-dir C:\Users\penta\repos\tinyserve\.evprtr\pi-rpc `
   --fresh-state `
   --provider evprtr --model evprtr `
-  --prompt "..."
+  --prompt-file C:\Users\penta\repos\tinyserve\.evprtr\prompts\step.txt
+
+# Prefer --prompt-file on Windows PowerShell (quoting breaks multiline --prompt).
 
 # B: supervisor / Cursor
 python harness/pi/rpc_bridge.py pending --state-dir ...\pi-rpc
