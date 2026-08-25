@@ -26,6 +26,13 @@ python harness/pi/rpc_bridge.py decide --state-dir ...\pi-rpc --id <uuid> --appr
 python harness/pi/rpc_bridge.py wait --state-dir ...\pi-rpc
 ```
 
+### Rewrite / reject loop suppression
+
+| Layer | Behavior |
+|---|---|
+| Pi gate | After a write/edit/shell is **approved once**, an identical mutation is **blocked** immediately (no second confirm). Confirm body includes `fp=...`. |
+| `rpc_bridge` | Same `fp` already approved → auto-reject + **abort**. Identical pending twice → auto-reject; three times → abort. Tunable: `--identical-pending-reject-at` / `--identical-pending-abort-at`. |
+
 Interactive TUI (`pi` without `--mode rpc`) also works: the gate uses `ctx.ui.confirm` in-process.
 
 ## What the gate does

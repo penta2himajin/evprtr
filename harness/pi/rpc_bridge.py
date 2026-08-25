@@ -30,6 +30,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Allow `python harness/pi/rpc_bridge.py` without installing the package.
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from rewrite_guard import RewriteGuard, fingerprint_from_confirm_message  # noqa: E402
+
 
 def _default_ext() -> Path:
     return Path(__file__).resolve().parent / "evprtr-side-effect-gate.ts"
@@ -175,6 +182,52 @@ def cmd_run(args: argparse.Namespace) -> int:
     settled = False
     prompt_sent = False
     reject_count = 0
+    guard = RewriteGuard(
+        identical_pending_limit=max(1, int(args.identical_pending_reject_at)),
+        identical_pending_abort_at=max(
+            max(1, int(args.identical_pending_reject_at)) + 1,
+            int(args.identical_pending_abort_at),
+        ),
+    )
+
+    def _abort_run(phase: str, **extra: Any) -> None:
+        nonlocal settled
+        print(f"RPC_BRIDGE: abort ({phase}) {extra}", flush=True)
+        _set_status(state, phase=phase, reject_count=reject_count, **extra)
+        try:
+            _send(proc, {"type": "abort"})
+        except Exception:
+            pass
+        settled = False
+
+    def _apply_confirm(req_id: str, confirmed: bool, note: str) -> None:
+        nonlocal reject_count
+        _send(
+            proc,
+            {
+                "type": "extension_ui_response",
+                "id": req_id,
+                "confirmed": confirmed,
+            },
+        )
+        if confirmed:
+            reject_count = 0
+        else:
+            reject_count += 1
+        _append_event(
+            state,
+            {
+                "type": "bridge_decision",
+                "id": req_id,
+                "confirmed": confirmed,
+                "note": note,
+                "auto": True,
+            },
+        )
+        print(
+            f"RPC_BRIDGE: auto_decision id={req_id} confirmed={confirmed} note={note!r}",
+            flush=True,
+        )
 
     try:
         # Give RPC a moment to boot, then send the prompt.
@@ -247,6 +300,35 @@ def cmd_run(args: argparse.Namespace) -> int:
                         f"message={pending.get('message')!r}",
                         flush=True,
                     )
+
+                    fp = (
+                        fingerprint_from_confirm_message(str(pending.get("message") or ""))
+                        if method == "confirm"
+                        else None
+                    )
+                    if method == "confirm" and fp:
+                        action, note = guard.on_pending(fp)
+                        if action in {"auto_reject", "abort"}:
+                            _apply_confirm(req_id, False, note)
+                            # Clear pending file so status/pending stay consistent.
+                            try:
+                                (state / "pending" / f"{req_id}.json").unlink()
+                            except OSError:
+                                pass
+                            _set_status(state, phase="running", pending_id=None)
+                            if action == "abort" or (
+                                args.max_rejects and reject_count >= args.max_rejects
+                            ):
+                                _abort_run(
+                                    "aborted_rewrite_loop"
+                                    if action == "abort"
+                                    else "aborted_rejects",
+                                    fingerprint=fp,
+                                    note=note,
+                                )
+                                break
+                            continue
+
                     decision = _wait_decision(state, req_id, args.decision_timeout)
                     if decision.get("cancelled"):
                         _send(
@@ -267,28 +349,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                                 "confirmed": confirmed,
                             },
                         )
-                        if not confirmed:
+                        if confirmed:
+                            guard.on_approved(fp)
+                            reject_count = 0
+                        else:
+                            guard.on_rejected(fp)
                             reject_count += 1
                             if args.max_rejects and reject_count >= args.max_rejects:
-                                print(
-                                    "RPC_BRIDGE: abort after "
-                                    f"{reject_count} rejected confirms "
-                                    "(max-rejects)",
-                                    flush=True,
+                                _abort_run(
+                                    "aborted_rejects",
+                                    fingerprint=fp,
                                 )
-                                _set_status(
-                                    state,
-                                    phase="aborted_rejects",
-                                    reject_count=reject_count,
-                                )
-                                try:
-                                    _send(proc, {"type": "abort"})
-                                except Exception:
-                                    pass
-                                settled = False
                                 break
-                        else:
-                            reject_count = 0
                     elif method == "select":
                         _send(
                             proc,
@@ -315,7 +387,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                     )
                     if state.joinpath("status.json").is_file():
                         st = _read_json(state / "status.json")
-                        if st.get("phase") == "aborted_rejects":
+                        if st.get("phase") in {
+                            "aborted_rejects",
+                            "aborted_rewrite_loop",
+                        }:
                             break
                     continue
 
@@ -340,7 +415,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             st_path = state / "status.json"
             if st_path.is_file():
                 try:
-                    if _read_json(st_path).get("phase") == "aborted_rejects":
+                    if _read_json(st_path).get("phase") in {
+                        "aborted_rejects",
+                        "aborted_rewrite_loop",
+                    }:
                         break
                 except json.JSONDecodeError:
                     pass
@@ -469,6 +547,18 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=12,
         help="Abort after this many rejected gated confirms in one run (0=never)",
+    )
+    run.add_argument(
+        "--identical-pending-reject-at",
+        type=int,
+        default=2,
+        help="Auto-reject when the same gated confirm fingerprint repeats this many times",
+    )
+    run.add_argument(
+        "--identical-pending-abort-at",
+        type=int,
+        default=3,
+        help="Abort when the same gated confirm fingerprint repeats this many times",
     )
     run.set_defaults(func=cmd_run)
 

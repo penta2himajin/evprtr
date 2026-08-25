@@ -12,6 +12,10 @@
  *
  * Print/JSON (`-p`, no UI): side-effect tools are blocked.
  *
+ * Duplicate suppression: once a write/edit/shell mutation is approved in this
+ * Pi session, an identical call is blocked immediately (no second confirm) so
+ * rewrite loops cannot burn supervisor time.
+ *
  * Optional audit: when EVPRTR_BASE_URL is set (default http://127.0.0.1:8741),
  * each gated call is enqueued at POST /v1/approvals and then approve/reject
  * is recorded to match the UI decision.
@@ -24,6 +28,7 @@
  *   python harness/pi/rpc_bridge.py run --cwd <repo> --prompt "..."
  */
 
+import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const GATED = new Set(["bash", "powershell", "write", "edit"]);
@@ -32,6 +37,27 @@ const PASSTHROUGH = new Set(["read", "grep", "find", "ls"]);
 
 function baseUrl(): string {
 	return (process.env.EVPRTR_BASE_URL || "http://127.0.0.1:8741").replace(/\/$/, "");
+}
+
+function sha32(text: string): string {
+	return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32);
+}
+
+function mutationFingerprint(toolName: string, input: Record<string, unknown>): string {
+	if (toolName === "write") {
+		const path = String(input.path ?? "");
+		const content = String(input.content ?? "");
+		return `write:${path}:${sha32(content)}`;
+	}
+	if (toolName === "edit") {
+		const path = String(input.path ?? "");
+		const edits = input.edits ?? [];
+		return `edit:${path}:${sha32(JSON.stringify(edits))}`;
+	}
+	if (toolName === "bash" || toolName === "powershell") {
+		return `${toolName}:${sha32(String(input.command ?? ""))}`;
+	}
+	return `${toolName}:${sha32(JSON.stringify(input))}`;
 }
 
 function previewInput(toolName: string, input: Record<string, unknown>): string {
@@ -101,6 +127,9 @@ async function decideAudit(id: string | null, approve: boolean, note: string): P
 }
 
 export default function (pi: ExtensionAPI) {
+	/** Mutations already approved in this Pi process — block identical retries. */
+	const approvedFingerprints = new Set<string>();
+
 	pi.on("tool_call", async (event, ctx) => {
 		const name = event.toolName;
 		if (PASSTHROUGH.has(name) || !GATED.has(name)) {
@@ -108,8 +137,29 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const input = (event.input ?? {}) as Record<string, unknown>;
+		const fp = mutationFingerprint(name, input);
 		const summary = previewInput(name, input);
 		const argsJson = JSON.stringify(input);
+
+		if (approvedFingerprints.has(fp)) {
+			const reason =
+				`Duplicate ${name} blocked by evprtr Pi gate: identical mutation ` +
+				`already approved this session (fp=${fp}). Do not rewrite the same ` +
+				`file with the same content — stop or make a different change.`;
+			await enqueueAudit({
+				tool_name: name,
+				arguments: argsJson,
+				raw_tool_call: {
+					id: event.toolCallId,
+					type: "function",
+					function: { name, arguments: argsJson },
+				},
+				reason: "pi side-effect gate duplicate block",
+				tags: ["pi_gate", "side_effect", "duplicate", ctx.mode],
+			}).then((id) => decideAudit(id, false, reason));
+			return { block: true, reason };
+		}
+
 		const actionId = await enqueueAudit({
 			tool_name: name,
 			arguments: argsJson,
@@ -139,10 +189,12 @@ export default function (pi: ExtensionAPI) {
 
 		const title = `evprtr: approve ${name}?`;
 		const body =
+			`fp=${fp}\n` +
 			(actionId ? `[${actionId}]\n` : "") +
 			`${summary}\n\nAllow this side-effect tool to run in the Pi harness?`;
 		const ok = await ctx.ui.confirm(title, body);
 		if (ok) {
+			approvedFingerprints.add(fp);
 			await decideAudit(actionId, true, "approved via Pi UI/RPC; executed by harness");
 			return undefined;
 		}
