@@ -8,7 +8,7 @@ The name **evprtr** comes from **evaporator**, the evaporator used when turning 
 
 ## Status
 
-OpenAI-compatible API, failure traces, verify/repair (repetition + pseudo tool markup), and a peelable Needle 2 tool-determination path. Maple remains the prose/reasoning runtime.
+OpenAI-compatible API (`stream=true` is handled by a non-streaming SSE shim for harnesses like Pi), failure traces, verify/repair (repetition + pseudo tool markup), a peelable Needle 2 tool-determination path, and a side-effect tool approvals buffer. Maple remains the prose/reasoning runtime.
 
 ## Quick start
 

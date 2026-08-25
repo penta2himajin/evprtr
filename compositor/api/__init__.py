@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from compositor.api.schemas import ChatCompletionRequest, ModelCard, ModelList
+from compositor.api.stream_shim import iter_sse_from_completion
 from compositor.approvals.buffer import SideEffectBuffer
 from compositor.approvals.store import ApprovalStatus, ApprovalStore
 from compositor.core import Compositor
@@ -18,7 +19,7 @@ from compositor.runtimes import UpstreamError
 from compositor.runtimes.needle import NeedleToolRuntime
 from compositor.runtimes.openai_compat import OpenAICompatRuntime
 from compositor.tools.path import NeedleToolPath
-from compositor.trace import FailureLocus, TraceStore, summarize_request
+from compositor.trace import FailureLocus, TraceStore
 
 TRACE_HEADER = "X-Evprtr-Trace-Id"
 APPROVALS_HEADER = "X-Evprtr-Approvals"
@@ -171,34 +172,21 @@ def build_app(
         assert updated is not None
         return updated.to_dict()
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(body: ChatCompletionRequest, request: Request) -> JSONResponse:
-        if body.stream:
-            session = app.state.traces.start(
-                public_model=app.state.public_model_id,
-                request_summary=summarize_request(body.model_dump(exclude_none=True)),
-            )
-            session.fail(
-                FailureLocus.ACCEPT,
-                "streaming is not implemented in compositor v0; set stream=false",
-                stage="accept",
-            )
-            trace = session.finish(ok=False)
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "streaming is not implemented in compositor v0; set stream=false",
-                    "trace_id": trace.trace_id,
-                    "locus": trace.locus,
-                },
-                headers={TRACE_HEADER: trace.trace_id},
-            )
-
+    @app.post("/v1/chat/completions", response_model=None)
+    async def chat_completions(
+        body: ChatCompletionRequest, request: Request
+    ) -> JSONResponse | StreamingResponse:
         payload = body.model_dump(exclude_none=True)
         raw: dict[str, Any] = await request.json()
         for key, value in raw.items():
             if key not in payload:
                 payload[key] = value
+
+        # Harnesses often force stream=true; run non-streaming internally and
+        # wrap as SSE so Pi/OpenCode-style clients can drive an agent loop.
+        want_stream = bool(payload.pop("stream", False) or body.stream)
+        payload["stream"] = False
+        _normalize_message_roles(payload)
 
         try:
             result = await app.state.compositor.chat_completions(payload)
@@ -222,9 +210,28 @@ def build_app(
         buffered = (result.trace.response_summary or {}).get("buffered_approvals") or []
         if buffered:
             headers[APPROVALS_HEADER] = ",".join(buffered)
+
+        if want_stream:
+            headers["Cache-Control"] = "no-cache"
+            headers["Connection"] = "keep-alive"
+            return StreamingResponse(
+                iter_sse_from_completion(result.response),
+                media_type="text/event-stream",
+                headers=headers,
+            )
         return JSONResponse(result.response, headers=headers)
 
     return app
+
+
+def _normalize_message_roles(payload: dict[str, Any]) -> None:
+    """Map harness-only roles (e.g. Pi ``developer``) to OpenAI ``system``."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "developer":
+            msg["role"] = "system"
 
 
 def _maybe_needle_tool_path(public_model_id: str) -> NeedleToolPath | None:

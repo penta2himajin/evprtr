@@ -79,20 +79,31 @@ async def test_chat_completions_passthrough_rewrites_model_id(client):
 
 
 @pytest.mark.asyncio
-async def test_stream_rejected_in_v0_with_accept_locus(client):
-    ac, _, store = client
+async def test_stream_shim_returns_sse_from_full_completion(client):
+    ac, runtime, store = client
     response = await ac.post(
         "/v1/chat/completions",
         json={
             "model": "evprtr",
             "stream": True,
-            "messages": [{"role": "user", "content": "hi"}],
+            "messages": [
+                {"role": "developer", "content": "be brief"},
+                {"role": "user", "content": "hi"},
+            ],
         },
     )
-    assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert detail["locus"] == "accept"
-    assert store.get(detail["trace_id"]) is not None
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    text = response.text
+    assert "chat.completion.chunk" in text
+    assert "hello from upstream" in text
+    assert "data: [DONE]" in text
+    assert runtime.calls[0]["stream"] is False
+    assert runtime.calls[0]["messages"][0]["role"] == "system"
+    trace_id = response.headers.get("x-evprtr-trace-id")
+    assert trace_id
+    assert store.get(trace_id) is not None
+    assert store.get(trace_id).ok is True
 
 
 @pytest.mark.asyncio
