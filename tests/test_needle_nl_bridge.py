@@ -73,6 +73,35 @@ def test_prepare_needle_instruction_falls_back_on_degenerate():
     assert len(out) < len(bad)
 
 
+def test_needle_retry_instruction_allowlists_tools_and_keeps_planner_note():
+    from compositor.tools.maple_nl import needle_retry_instruction
+
+    out = needle_retry_instruction(
+        maple_nl="List the repo root with ls, then read README.md",
+        user_task="このリポジトリの内容を調べて",
+        tool_names=["read", "ls", "grep", "find"],
+    )
+    assert "Tool name must be one of: read, ls, grep, find" in out
+    assert "write" in out  # forbidden when not allowlisted
+    assert "phone call" in out
+    assert "Planner note:" in out
+    assert "List the repo root" in out
+    assert "Call the needed tools now" not in out
+
+
+def test_needle_retry_instruction_keeps_create_file_shape():
+    from compositor.tools.maple_nl import needle_retry_instruction
+
+    out = needle_retry_instruction(
+        maple_nl="please write the file",
+        user_task="Create file live.txt with exactly this content:\nok\n",
+        tool_names=["write", "read"],
+    )
+    assert out.startswith("Call write.")
+    assert "live.txt" in out
+    assert "ok" in out
+
+
 @pytest.mark.asyncio
 async def test_maple_nl_then_needle(tmp_path):
     class Maple:
@@ -377,6 +406,100 @@ async def test_nl_retries_on_degenerate_write(tmp_path):
     ]
     assert "needle_quality_miss" in phases
     assert "needle_retry_user_task" in phases
+
+
+@pytest.mark.asyncio
+async def test_nl_empty_call_retry_uses_allowlisted_brief(tmp_path):
+    """Abstain → structured retry (not soft user-task) can recover read/ls."""
+
+    class Maple:
+        async def chat_completions(self, payload):
+            assert payload.get("tool_choice") == "none"
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Call ls on the current directory.",
+                        }
+                    }
+                ]
+            }
+
+    class RT(NeedleToolRuntime):
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            self.queries.append(query)
+            if "Tool name must be one of:" in query and "ls" in query:
+                return NeedleCompleteResult(
+                    function_calls=[{"name": "ls", "arguments": {"path": "."}}],
+                    confidence=0.9,
+                    reasoning="ok",
+                    raw={},
+                )
+            return NeedleCompleteResult(
+                function_calls=[],
+                confidence=0.01,
+                reasoning="No tool for phone calls",
+                raw={},
+            )
+
+    rt = RT()
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        tool_path=NeedleToolPath(rt),
+        needle_via_maple_nl=True,
+        needle_chunk_writes=False,
+        buffer_side_effects=False,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [{"role": "user", "content": "リポジトリを調べて"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ls",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                },
+            ],
+        }
+    )
+    assert len(rt.queries) >= 2
+    assert "Tool name must be one of: ls, read" in rt.queries[1]
+    assert "phone call" in rt.queries[1]
+    assert result.response["choices"][0]["finish_reason"] == "tool_calls"
+    assert (
+        result.response["choices"][0]["message"]["tool_calls"][0]["function"]["name"]
+        == "ls"
+    )
+    phases = [
+        e.detail.get("phase")
+        for e in result.trace.events
+        if e.stage == "tool_select" and isinstance(e.detail, dict)
+    ]
+    assert "needle_retry_user_task" in phases
+    assert "fallback_maple" not in phases
 
 
 @pytest.mark.asyncio

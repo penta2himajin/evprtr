@@ -68,6 +68,7 @@ def build_app(
             runtime = OpenAICompatRuntime(
                 upstream,
                 upstream_model=_env("EVPRTR_UPSTREAM_MODEL"),
+                api_key=_env("EVPRTR_UPSTREAM_API_KEY"),
             )
         tool_path = _maybe_needle_tool_path(model_id)
         buffer_flag = (_env("EVPRTR_BUFFER_SIDE_EFFECTS", "1") or "1").lower()

@@ -18,12 +18,14 @@ from typing import Any
 from compositor.approvals.buffer import SideEffectBuffer
 from compositor.approvals.store import ApprovalStore
 from compositor.runtimes import ChatRuntime, UpstreamError
+from compositor.tools.convert import openai_tools_to_needle
 from compositor.tools.maple_nl import (
     align_create_file_tool_calls,
     assistant_text,
     correction_instruction,
     extract_fenced_files,
     maple_nl_request,
+    needle_retry_instruction,
     parse_create_file,
     prepare_needle_instruction,
     synthetic_mutation_response,
@@ -135,9 +137,7 @@ class Compositor:
             raise
 
         upstream, repaired = await self._verify_and_repair(request, upstream, session)
-        upstream = align_create_file_tool_calls(
-            upstream, original_user_text(request)
-        )
+        upstream = align_create_file_tool_calls(upstream, original_user_text(request))
 
         try:
             presented = self._present(upstream)
@@ -171,9 +171,7 @@ class Compositor:
             current, _repaired = await self._verify_and_repair(
                 request, current, session, allow_needle_correct=True
             )
-            current = align_create_file_tool_calls(
-                current, original_user_text(request)
-            )
+            current = align_create_file_tool_calls(current, original_user_text(request))
             presented = self._present(current)
             presented, buffered_ids = self._buffer_side_effects(
                 presented, session, session.trace_id
@@ -204,9 +202,7 @@ class Compositor:
             return False, getattr(self.tool_path, "last_skip_reason", None)
         if result.empty_call:
             return False, "empty_call"
-        if task_wants_mutation(user_task) and not tool_calls_satisfy_mutation(
-            result.response
-        ):
+        if task_wants_mutation(user_task) and not tool_calls_satisfy_mutation(result.response):
             return False, "missing_mutation"
         message = assistant_message(result.response)
         if message is None:
@@ -217,9 +213,7 @@ class Compositor:
             return False, f"degenerate:{detail.get('reason')}:{detail.get('path')}"
         return True, None
 
-    def _finalize_nl_result(
-        self, result: ToolPathResult, user_task: str
-    ) -> ToolPathResult:
+    def _finalize_nl_result(self, result: ToolPathResult, user_task: str) -> ToolPathResult:
         aligned = align_create_file_tool_calls(result.response, user_task)
         if aligned is result.response:
             return result
@@ -313,9 +307,7 @@ class Compositor:
         )
 
         if self.needle_chunk_writes:
-            fenced = extract_fenced_files(instruction) or extract_fenced_files(
-                needle_input
-            )
+            fenced = extract_fenced_files(instruction) or extract_fenced_files(needle_input)
             for path, content in fenced:
                 if len(content) < 12:
                     continue
@@ -334,9 +326,7 @@ class Compositor:
                     )
                     return chunked
 
-        result = await asyncio.to_thread(
-            self.tool_path.handle_instruction, needle_input, request
-        )
+        result = await asyncio.to_thread(self.tool_path.handle_instruction, needle_input, request)
         ok, miss_reason = self._nl_needle_acceptable(result, request, user_task)
         if not ok:
             if result is not None:
@@ -350,15 +340,24 @@ class Compositor:
                 )
             result = None
         if result is None:
-            # Second chance: clean user-task brief (Maple NL often confuses Needle).
-            retry = user_task_instruction(user_task)
+            # Second chance: allowlisted imperative retry (soft user-task briefs
+            # often made Needle invent phone-call / missing-write refusals).
+            tool_names = [
+                str(t.get("name"))
+                for t in openai_tools_to_needle(request.get("tools"))
+                if t.get("name")
+            ]
+            retry = needle_retry_instruction(
+                maple_nl=instruction,
+                user_task=user_task,
+                tool_names=tool_names,
+            )
             if retry.strip() and retry != needle_input:
                 session.event(
                     "tool_select",
                     "ok",
                     phase="needle_retry_user_task",
-                    reason=miss_reason
-                    or getattr(self.tool_path, "last_skip_reason", None),
+                    reason=miss_reason or getattr(self.tool_path, "last_skip_reason", None),
                     policy_id=self.tool_path.policy_id,
                 )
                 result = await asyncio.to_thread(
@@ -403,8 +402,7 @@ class Compositor:
                 "tool_select",
                 "ok",
                 phase="fallback_maple",
-                reason=miss_reason
-                or getattr(self.tool_path, "last_skip_reason", None),
+                reason=miss_reason or getattr(self.tool_path, "last_skip_reason", None),
                 policy_id=self.tool_path.policy_id,
             )
             return None
@@ -463,9 +461,7 @@ class Compositor:
             empty_call=result.empty_call,
             confidence=result.confidence,
             call_count=len(
-                ((result.response.get("choices") or [{}])[0].get("message") or {}).get(
-                    "tool_calls"
-                )
+                ((result.response.get("choices") or [{}])[0].get("message") or {}).get("tool_calls")
                 or []
             ),
         )
@@ -605,9 +601,7 @@ class Compositor:
                         self.tool_path.apply_chunked_file, fpath, content, request
                     )
                     if chunked is not None:
-                        aligned = align_create_file_tool_calls(
-                            chunked.response, task
-                        )
+                        aligned = align_create_file_tool_calls(chunked.response, task)
                         ok, _ = self._nl_needle_acceptable(
                             ToolPathResult(
                                 response=aligned,
@@ -671,11 +665,7 @@ class Compositor:
 
         synthetic = synthetic_mutation_response(task)
         if synthetic is not None:
-            via = (
-                "synthetic_create_file"
-                if parse_create_file(task)
-                else "synthetic_edit_replace"
-            )
+            via = "synthetic_create_file" if parse_create_file(task) else "synthetic_edit_replace"
             session.event(
                 "repair",
                 "ok",

@@ -10,9 +10,7 @@ import uuid
 from typing import Any
 
 _FENCE = re.compile(r"```(?:[\w.+-]*)\n([\s\S]*?)```", re.MULTILINE)
-_PATH_HINT = re.compile(
-    r"(?i)(?:write|create|update|save|path)\s*[:=]\s*[`\"]?([\w./\\-]+\.\w+)"
-)
+_PATH_HINT = re.compile(r"(?i)(?:write|create|update|save|path)\s*[:=]\s*[`\"]?([\w./\\-]+\.\w+)")
 
 
 def maple_nl_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -142,9 +140,52 @@ def user_task_instruction(user_task: str, *, limit: int = 1200) -> str:
     )
 
 
-def align_create_file_tool_calls(
-    response: dict[str, Any], user_task: str
-) -> dict[str, Any]:
+def needle_retry_instruction(
+    *,
+    maple_nl: str,
+    user_task: str,
+    tool_names: list[str],
+    limit: int = 800,
+) -> str:
+    """Second-chance Needle query after Maple NL → Needle abstains or misfires.
+
+    Soft ``user_task_instruction`` retries often worsened live failures (phone-call
+    / missing-write rationales). Prefer an allowlisted, imperative brief that
+    keeps a short planner note. Explicit create-file tasks keep the proven
+    ``Call write. path=...`` shape.
+    """
+    task = (user_task or "").strip()
+    if parse_create_file(task) is not None:
+        return user_task_instruction(task, limit=limit)
+
+    names = [str(n) for n in tool_names if n]
+    allow = ", ".join(names) if names else "(none)"
+    # Drop tools that are not on the allowlist from the "do not invent" hint.
+    forbidden_bits = ["phone call", "sms"]
+    if "write" not in names:
+        forbidden_bits.append("write")
+    if "edit" not in names:
+        forbidden_bits.append("edit")
+    forbid = ", ".join(forbidden_bits)
+
+    nl = (maple_nl or "").strip()
+    if len(nl) > 360:
+        nl = nl[:360].rstrip() + "…"
+    task_bit = task[:360] if task else ""
+
+    parts = [
+        "Emit one structured tool call now. Do not explain. Do not refuse.",
+        f"Tool name must be one of: {allow}.",
+        f"Do not invent tools such as {forbid}.",
+    ]
+    if nl:
+        parts.append(f"Planner note:\n{nl}")
+    if task_bit:
+        parts.append(f"User task:\n{task_bit}")
+    return "\n".join(parts)[:limit]
+
+
+def align_create_file_tool_calls(response: dict[str, Any], user_task: str) -> dict[str, Any]:
     """Force write path/content to match an explicit create-file user task.
 
     Needle sometimes mangles paths (e.g. ``file_live-nl-smoke.txt``). When the
@@ -223,9 +264,7 @@ def synthetic_create_file_response(user_task: str) -> dict[str, Any] | None:
                 "type": "function",
                 "function": {
                     "name": "write",
-                    "arguments": json.dumps(
-                        {"path": path, "content": body}, ensure_ascii=False
-                    ),
+                    "arguments": json.dumps({"path": path, "content": body}, ensure_ascii=False),
                 },
             }
         ],
@@ -235,9 +274,7 @@ def synthetic_create_file_response(user_task: str) -> dict[str, Any] | None:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": "evprtr",
-        "choices": [
-            {"index": 0, "message": message, "finish_reason": "tool_calls"}
-        ],
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
@@ -292,18 +329,14 @@ def synthetic_edit_replace_response(user_task: str) -> dict[str, Any] | None:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": "evprtr",
-        "choices": [
-            {"index": 0, "message": message, "finish_reason": "tool_calls"}
-        ],
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
 
 def synthetic_mutation_response(user_task: str) -> dict[str, Any] | None:
     """Best-effort deterministic tool_calls for explicit create/edit prompts."""
-    return synthetic_create_file_response(user_task) or synthetic_edit_replace_response(
-        user_task
-    )
+    return synthetic_create_file_response(user_task) or synthetic_edit_replace_response(user_task)
 
 
 def task_wants_mutation(user_task: str) -> bool:
