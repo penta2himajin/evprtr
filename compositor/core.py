@@ -23,6 +23,10 @@ from compositor.tools.maple_nl import (
     correction_instruction,
     extract_fenced_files,
     maple_nl_request,
+    prepare_needle_instruction,
+    task_wants_mutation,
+    tool_calls_satisfy_mutation,
+    user_task_instruction,
 )
 from compositor.tools.path import NeedleToolPath, ToolPathResult
 from compositor.trace import (
@@ -155,7 +159,10 @@ class Compositor:
         current = tool_result.response
         try:
             diagnosis = self.verify.diagnose(current, request=request)
-            if diagnosis is not None and diagnosis.kind == "degenerate_tool_args":
+            if diagnosis is not None and diagnosis.kind in {
+                "degenerate_tool_args",
+                "missing_mutation",
+            }:
                 session.event("verify", "error", **diagnosis.event_detail())
                 sanitized = self.verify.sanitize(current, diagnosis)
                 corrected = await self._needle_correct_degenerate(
@@ -231,6 +238,15 @@ class Compositor:
             return None
 
         instruction = assistant_text(maple_out)
+        # Prefer content; if Maple stuffed the plan into reasoning only, use that.
+        if not instruction:
+            choices = maple_out.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message") or {}
+                reasoning = msg.get("reasoning_content")
+                if isinstance(reasoning, str):
+                    instruction = reasoning.strip()
+        user_task = original_user_text(request)
         session.event(
             "tool_select",
             "ok",
@@ -239,17 +255,27 @@ class Compositor:
             policy_id=self.tool_path.policy_id,
         )
         if not instruction:
+            instruction = user_task_instruction(user_task)
             session.event(
                 "tool_select",
                 "ok",
-                phase="fallback_maple",
-                reason="empty_maple_nl",
+                phase="maple_nl_empty_use_task",
                 policy_id=self.tool_path.policy_id,
             )
-            return None
+
+        needle_input = prepare_needle_instruction(instruction, user_task=user_task)
+        session.event(
+            "tool_select",
+            "ok",
+            phase="needle_instruction_ready",
+            needle_instruction_len=len(needle_input),
+            policy_id=self.tool_path.policy_id,
+        )
 
         if self.needle_chunk_writes:
-            fenced = extract_fenced_files(instruction)
+            fenced = extract_fenced_files(instruction) or extract_fenced_files(
+                needle_input
+            )
             for path, content in fenced:
                 if len(content) < 12:
                     continue
@@ -269,8 +295,46 @@ class Compositor:
                     return chunked
 
         result = await asyncio.to_thread(
-            self.tool_path.handle_instruction, instruction, request
+            self.tool_path.handle_instruction, needle_input, request
         )
+        if result is not None and task_wants_mutation(user_task):
+            if not tool_calls_satisfy_mutation(result.response):
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="needle_mutation_miss",
+                    via=result.via,
+                    policy_id=self.tool_path.policy_id,
+                )
+                result = None
+        if result is None:
+            # Second chance: clean user-task brief (Maple NL often confuses Needle).
+            retry = user_task_instruction(user_task)
+            if retry.strip() and retry != needle_input:
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="needle_retry_user_task",
+                    reason=getattr(self.tool_path, "last_skip_reason", None),
+                    policy_id=self.tool_path.policy_id,
+                )
+                result = await asyncio.to_thread(
+                    self.tool_path.handle_instruction,
+                    retry,
+                    request,
+                )
+                if (
+                    result is not None
+                    and task_wants_mutation(user_task)
+                    and not tool_calls_satisfy_mutation(result.response)
+                ):
+                    session.event(
+                        "tool_select",
+                        "ok",
+                        phase="needle_retry_still_no_mutation",
+                        policy_id=self.tool_path.policy_id,
+                    )
+                    result = None
         if result is None:
             session.event(
                 "tool_select",
@@ -367,6 +431,7 @@ class Compositor:
             if diagnosis.kind not in {
                 "pseudo_tool_markup",
                 "degenerate_tool_args",
+                "missing_mutation",
             } and self.verify.has_usable_content(sanitized, request=request):
                 session.event(
                     "verify",
@@ -389,7 +454,7 @@ class Compositor:
 
             if (
                 allow_needle_correct
-                and diagnosis.kind == "degenerate_tool_args"
+                and diagnosis.kind in {"degenerate_tool_args", "missing_mutation"}
                 and self.needle_correct_degenerate
                 and self.tool_path is not None
                 and self.tool_path.enabled_for(request)
@@ -439,13 +504,18 @@ class Compositor:
         del sanitized
         detail = diagnosis.detail or {}
         task = original_user_text(request)
-        instruction = correction_instruction(
-            task=task,
-            tool=detail.get("tool"),
-            reason=detail.get("reason"),
-            path=detail.get("path"),
-            failed_preview=str(detail),
-        )
+        if diagnosis.kind == "missing_mutation":
+            from compositor.tools.maple_nl import user_task_instruction
+
+            instruction = user_task_instruction(task)
+        else:
+            instruction = correction_instruction(
+                task=task,
+                tool=detail.get("tool"),
+                reason=detail.get("reason"),
+                path=detail.get("path"),
+                failed_preview=str(detail),
+            )
         session.event(
             "repair",
             "ok",

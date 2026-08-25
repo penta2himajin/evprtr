@@ -59,6 +59,18 @@ def test_maple_nl_request_strips_tools():
     assert "tools" not in req
     assert req["tool_choice"] == "none"
     assert req["messages"][0]["role"] == "system"
+    assert req["max_tokens"] == 384
+
+
+def test_prepare_needle_instruction_falls_back_on_degenerate():
+    from compositor.tools.maple_nl import prepare_needle_instruction
+
+    bad = "smoke-smoke-smoke-" * 200
+    out = prepare_needle_instruction(
+        bad, user_task="Create file x.txt with content hi"
+    )
+    assert "Create file x.txt" in out
+    assert len(out) < len(bad)
 
 
 @pytest.mark.asyncio

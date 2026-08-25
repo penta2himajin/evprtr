@@ -118,3 +118,95 @@ def test_bundle_sanitizes_degenerate_tool_calls():
     cleaned = bundle.sanitize(upstream, diagnosis)
     msg = cleaned["choices"][0]["message"]
     assert msg.get("tool_calls") in (None, [])
+
+
+def test_missing_mutation_detector_flags_read_only():
+    from compositor.verify.detectors_tools import MissingMutationDetector
+
+    d = MissingMutationDetector()
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Create file notes.txt with content hello via write tool",
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "write", "parameters": {"type": "object"}},
+            },
+            {
+                "type": "function",
+                "function": {"name": "read", "parameters": {"type": "object"}},
+            },
+        ],
+    }
+    hit = d.diagnose(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "arguments": '{"path": "notes.txt"}',
+                    },
+                }
+            ],
+        },
+        request=request,
+    )
+    assert hit is not None
+    assert hit.kind == "missing_mutation"
+
+
+def test_bundle_sanitizes_missing_mutation():
+    bundle = VerifyBundle.maple_preview()
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Create file notes.txt with content hello via write tool",
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "write", "parameters": {"type": "object"}},
+            },
+            {
+                "type": "function",
+                "function": {"name": "read", "parameters": {"type": "object"}},
+            },
+        ],
+    }
+    upstream = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {
+                                "name": "read",
+                                "arguments": '{"path": "notes.txt"}',
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    diagnosis = bundle.diagnose(upstream, request=request)
+    assert diagnosis is not None
+    assert diagnosis.kind == "missing_mutation"
+    cleaned = bundle.sanitize(upstream, diagnosis)
+    msg = cleaned["choices"][0]["message"]
+    assert msg.get("tool_calls") in (None, [])
+    assert "write/edit" in str(msg.get("content") or "")

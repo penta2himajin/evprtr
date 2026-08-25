@@ -11,9 +11,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from compositor.tools.maple_nl import task_wants_mutation, tool_calls_satisfy_mutation
+from compositor.verify.repair import original_user_text, request_has_tools
 from compositor.verify.types import Diagnosis
 
 DEGENERATE_TOOL_ARGS_ID = "maple_preview.degenerate_tool_args"
+MISSING_MUTATION_ID = "maple_preview.missing_mutation"
 
 _CODEISH_SUFFIXES = (
     ".toml",
@@ -138,3 +141,57 @@ class DegenerateToolCallDetector:
                 # Seen live: invented oldText that never exists in the file.
                 return {"reason": "invented_old_text", "path": path}
         return None
+
+
+def _offered_mutation_tools(request: dict[str, Any] | None) -> bool:
+    tools = (request or {}).get("tools")
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        name = str((fn or {}).get("name") or "")
+        if name in {"write", "edit", "bash", "powershell"}:
+            return True
+    return False
+
+
+class MissingMutationDetector:
+    """Task needs write/edit but the model stopped with only read/prose."""
+
+    policy_id = MISSING_MUTATION_ID
+
+    def diagnose(
+        self,
+        message: dict[str, Any],
+        *,
+        request: dict[str, Any] | None = None,
+    ) -> Diagnosis | None:
+        if not request_has_tools(request or {}):
+            return None
+        if not _offered_mutation_tools(request):
+            return None
+        task = original_user_text(request or {})
+        if not task_wants_mutation(task):
+            return None
+        wrapped = {"choices": [{"message": message}]}
+        if tool_calls_satisfy_mutation(wrapped):
+            return None
+        calls = message.get("tool_calls") or []
+        names = []
+        for call in calls:
+            if isinstance(call, dict):
+                fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                names.append(str(fn.get("name") or ""))
+        return Diagnosis(
+            policy_id=self.policy_id,
+            field="tool_calls",
+            kind="missing_mutation",
+            onset=0,
+            detail={
+                "reason": "read_or_prose_without_write",
+                "tool_names": names,
+                "task_head": task[:160],
+            },
+        )

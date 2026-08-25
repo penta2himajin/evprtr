@@ -136,6 +136,19 @@ class FreshConstrainedRepair:
                 payload, user, attempt, agentic=True
             )
 
+        if diagnosis.kind == "missing_mutation":
+            user = (
+                "Previous turn did not perform the required file/shell mutation "
+                "(only read/prose, or no tool call).\n"
+                "Retry now. Emit a real structured write/edit (or bash only if "
+                "unavoidable) tool call. Do not stop after read-only exploration.\n"
+                "Keep reasoning short.\n\n"
+                f"Task:\n{original}"
+            )
+            return self._apply_messages_and_knobs(
+                payload, user, attempt, agentic=True
+            )
+
         if agentic:
             user = (
                 "Previous model output was unusable (repetition, empty answer, or confusion).\n"
@@ -212,7 +225,11 @@ class MaplePreviewRepair(FreshConstrainedRepair):
         attempt: int,
         diagnosis: Diagnosis,
     ) -> dict[str, Any]:
-        if diagnosis.kind in {"pseudo_tool_markup", "degenerate_tool_args"}:
+        if diagnosis.kind in {
+            "pseudo_tool_markup",
+            "degenerate_tool_args",
+            "missing_mutation",
+        }:
             return super().build_payload(request, attempt=attempt, diagnosis=diagnosis)
 
         if request_has_tools(request):
