@@ -509,6 +509,13 @@ def cmd_wait(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles (cp932) choke on em dashes in tool previews; never let
+    # logging encode errors stall a pending decision wait.
+    try:
+        sys.stdout.reconfigure(errors="replace")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(errors="replace")  # type: ignore[attr-defined]
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="evprtr Pi RPC approval bridge")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
