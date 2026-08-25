@@ -82,6 +82,94 @@ def test_noop_edit_detected():
     assert hit.detail["reason"] == "noop_edit"
 
 
+def test_empty_edit_texts_detected():
+    d = DegenerateToolCallDetector()
+    hit = d.diagnose(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_y",
+                    "type": "function",
+                    "function": {
+                        "name": "edit",
+                        "arguments": json.dumps(
+                            {"path": "notes.txt", "edits": [{}]}
+                        ),
+                    },
+                }
+            ],
+        }
+    )
+    assert hit is not None
+    assert hit.detail["reason"] == "empty_edit_texts"
+
+
+def test_align_create_file_rewrites_mangled_path():
+    from compositor.tools.maple_nl import align_create_file_tool_calls
+
+    task = (
+        "Create file live-nl-smoke5.txt with exactly this content:\n"
+        "nl-needle-ok\n\nUse the write tool."
+    )
+    upstream = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        _write_call("file_live-nl-smoke5.txt", "nl-needle-ok")
+                    ],
+                }
+            }
+        ]
+    }
+    out = align_create_file_tool_calls(upstream, task)
+    args = json.loads(out["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args["path"] == "live-nl-smoke5.txt"
+    assert args["content"] == "nl-needle-ok"
+
+
+def test_parse_create_file_stops_at_harness_blurb():
+    from compositor.tools.maple_nl import parse_create_file
+
+    task = (
+        "Create file live-nl-smoke6b.txt with exactly this content:\n"
+        "second-ok\n\n"
+        "You may read first if needed, but you must end by calling write "
+        "with the file. Do not stop after read."
+    )
+    parsed = parse_create_file(task)
+    assert parsed is not None
+    path, body = parsed
+    assert path == "live-nl-smoke6b.txt"
+    assert body == "second-ok"
+
+
+def test_synthetic_create_and_edit():
+    from compositor.tools.maple_nl import (
+        synthetic_create_file_response,
+        synthetic_edit_replace_response,
+    )
+
+    w = synthetic_create_file_response(
+        "Create file a.txt with exactly this content:\nhi\n\nUse the write tool."
+    )
+    assert w is not None
+    args = json.loads(w["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"path": "a.txt", "content": "hi"}
+
+    e = synthetic_edit_replace_response(
+        'Edit the file C:\\tmp\\x.txt: replace oldText "alpha" with newText "gamma".'
+    )
+    assert e is not None
+    eargs = json.loads(e["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert eargs["path"].endswith("x.txt")
+    assert eargs["edits"][0] == {"oldText": "alpha", "newText": "gamma"}
+
+
 def test_repair_degenerate_stays_agentic():
     repair = MaplePreviewRepair()
     request = {

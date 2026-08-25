@@ -50,3 +50,7 @@ Deferred: Pi harness steer after N reads; `tool_choice=required`.
 
 - Live small-write OK → proceeded with read-only settle detector (above).
 - Unit: `tests/test_degenerate_tool_args.py` covers missing_mutation diagnose + sanitize.
+- Hole fixes after smoke4/5: NL rejects degenerate args (`needle_quality_miss` → user-task retry); Needle correct validates before accept; create-file path/body align; empty edit texts flagged; `_finish_tool_result` uses full verify loop.
+- Live re-smoke: `tr-61045121…` (smoke6) Pass — quality miss then retry → exact `write path=live-nl-smoke6.txt content=nl-needle-ok`.
+- Further: deterministic `synthetic_create_file` / `synthetic_edit_replace` when Needle still fails on explicit prompts; create-file body stops at harness blurbs.
+- Live `tr-e2921bda…` / `tr-f5f655d2…` (smoke7): create write exact; edit via=`synthetic_edit_replace` with correct old/new.

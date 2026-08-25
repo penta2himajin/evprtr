@@ -130,16 +130,22 @@ class DegenerateToolCallDetector:
         edits = args.get("edits")
         if not isinstance(edits, list) or not edits:
             return {"reason": "empty_edits", "path": path}
+        usable = 0
         for edit in edits:
             if not isinstance(edit, dict):
                 continue
             old = str(edit.get("oldText") or edit.get("old_string") or "")
             new = str(edit.get("newText") or edit.get("new_string") or "")
+            if not old and not new:
+                return {"reason": "empty_edit_texts", "path": path}
             if old and old == new:
                 return {"reason": "noop_edit", "path": path, "old_len": len(old)}
             if old and len(old) < 80 and "tokio {version" in old.replace(" ", ""):
                 # Seen live: invented oldText that never exists in the file.
                 return {"reason": "invented_old_text", "path": path}
+            usable += 1
+        if usable == 0:
+            return {"reason": "empty_edit_texts", "path": path}
         return None
 
 

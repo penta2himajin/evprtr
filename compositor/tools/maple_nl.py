@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
+import time
+import uuid
 from typing import Any
 
 _FENCE = re.compile(r"```(?:[\w.+-]*)\n([\s\S]*?)```", re.MULTILINE)
@@ -83,6 +86,32 @@ _CREATE_FILE = re.compile(
 )
 
 
+def parse_create_file(user_task: str) -> tuple[str, str] | None:
+    """Extract (path, body) from a create-file user prompt, if present."""
+    task = (user_task or "").strip()
+    m = _CREATE_FILE.search(task)
+    if not m:
+        return None
+    path = m.group("path").strip()
+    body = m.group("body").strip()
+    body = re.split(r"(?i)\n\s*use the write", body)[0].strip()
+    # Keep only the first paragraph — later lines are usually harness instructions
+    # ("You may read first…", "Do not stop after read.").
+    body = re.split(r"\n\s*\n", body, maxsplit=1)[0].strip()
+    trimmed: list[str] = []
+    for line in body.splitlines():
+        if re.match(
+            r"(?i)^(you may|use the|do not|please |after |then )",
+            line.strip(),
+        ):
+            break
+        trimmed.append(line)
+    body = "\n".join(trimmed).strip()
+    if not path or not body:
+        return None
+    return path, body
+
+
 def user_task_instruction(user_task: str, *, limit: int = 1200) -> str:
     """Render a Needle-friendly imperative brief from the user task.
 
@@ -91,18 +120,191 @@ def user_task_instruction(user_task: str, *, limit: int = 1200) -> str:
     or picks ``read`` on soft “convert this task” phrasing.
     """
     task = (user_task or "").strip()
-    m = _CREATE_FILE.search(task)
-    if m:
-        path = m.group("path").strip()
-        body = m.group("body").strip()
-        # Drop trailing instructional lines from the capture.
-        body = re.split(r"(?i)\n\s*use the write", body)[0].strip()
+    parsed = parse_create_file(task)
+    if parsed is not None:
+        path, body = parsed
         return f'Call write. path="{path}". content must be exactly:\n{body}'
+    lower = task.lower()
+    if any(k in lower for k in ("edit ", "update file", "patch ", "modify ")):
+        return (
+            "Call edit (or write with the full updated file). "
+            "path must be a real filename with extension. "
+            "edits must include non-empty oldText and different newText. "
+            "Do not call read unless you must inspect an existing file first; "
+            "after any read, you must still emit write/edit in a later step — "
+            "this turn should prefer the mutation tool call.\n\n"
+            f"Task:\n{task[:limit]}"
+        )
     return (
         "Call the needed tools now. For new or overwritten files call write "
         "with path and the full content. Do not call read unless the task "
-        "requires inspecting an existing file first.\n\n"
+        "requires inspecting an existing file first; if the task is to create "
+        "or change a file, emit write/edit now — do not stop after read.\n\n"
         f"Task:\n{task[:limit]}"
+    )
+
+
+def align_create_file_tool_calls(
+    response: dict[str, Any], user_task: str
+) -> dict[str, Any]:
+    """Force write path/content to match an explicit create-file user task.
+
+    Needle sometimes mangles paths (e.g. ``file_live-nl-smoke.txt``). When the
+    user spelled the target file and body, prefer those over Needle's guess.
+    """
+    parsed = parse_create_file(user_task)
+    if parsed is None:
+        return response
+    want_path, want_body = parsed
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return response
+    choice0 = choices[0]
+    if not isinstance(choice0, dict):
+        return response
+    message = choice0.get("message")
+    if not isinstance(message, dict):
+        return response
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list) or not calls:
+        return response
+
+    out = copy.deepcopy(response)
+    out_msg = out["choices"][0]["message"]
+    out_calls = out_msg.get("tool_calls") or []
+    changed = False
+    for call in out_calls:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = str(fn.get("name") or "")
+        if name != "write":
+            continue
+        raw = fn.get("arguments")
+        args: dict[str, Any]
+        if isinstance(raw, dict):
+            args = dict(raw)
+        elif isinstance(raw, str) and raw.strip():
+            try:
+                parsed_args = json.loads(raw)
+                args = parsed_args if isinstance(parsed_args, dict) else {}
+            except json.JSONDecodeError:
+                args = {}
+        else:
+            args = {}
+        path = str(args.get("path") or "").strip()
+        content = str(args.get("content") or "")
+        # Rewrite when path differs or content empty/wrong for exact create.
+        if path != want_path or content.strip() != want_body.strip():
+            args["path"] = want_path
+            args["content"] = want_body
+            fn["arguments"] = json.dumps(args, ensure_ascii=False)
+            changed = True
+            break
+    if not changed:
+        return response
+    return out
+
+
+def synthetic_create_file_response(user_task: str) -> dict[str, Any] | None:
+    """Deterministic write tool_calls when the user spelled path + exact body.
+
+    Needle sometimes abstains or misreads ``Call write`` as a phone-call intent.
+    For explicit create-file prompts we do not need the model.
+    """
+    parsed = parse_create_file(user_task)
+    if parsed is None:
+        return None
+    path, body = parsed
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "arguments": json.dumps(
+                        {"path": path, "content": body}, ensure_ascii=False
+                    ),
+                },
+            }
+        ],
+    }
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": "evprtr",
+        "choices": [
+            {"index": 0, "message": message, "finish_reason": "tool_calls"}
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+_EDIT_REPLACE = re.compile(
+    r"(?is)edit(?:\s+the)?\s+file\s+(?P<path>[\w./\\:\-]+\.\w+)\s*[:\-]?\s*"
+    r".*?oldText\s*[\"'`](?P<old>[^\"'`]+)[\"'`]\s*with\s*newText\s*[\"'`](?P<new>[^\"'`]+)[\"'`]"
+)
+
+
+def parse_edit_replace(user_task: str) -> tuple[str, str, str] | None:
+    """Extract (path, old, new) from an explicit edit/replace prompt."""
+    m = _EDIT_REPLACE.search(user_task or "")
+    if not m:
+        return None
+    path = m.group("path").strip()
+    old = m.group("old").strip()
+    new = m.group("new").strip()
+    if not path or not old or old == new:
+        return None
+    return path, old, new
+
+
+def synthetic_edit_replace_response(user_task: str) -> dict[str, Any] | None:
+    """Deterministic edit tool_calls for explicit oldText/newText prompts."""
+    parsed = parse_edit_replace(user_task)
+    if parsed is None:
+        return None
+    path, old, new = parsed
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {
+                    "name": "edit",
+                    "arguments": json.dumps(
+                        {
+                            "path": path,
+                            "edits": [{"oldText": old, "newText": new}],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            }
+        ],
+    }
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": "evprtr",
+        "choices": [
+            {"index": 0, "message": message, "finish_reason": "tool_calls"}
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+def synthetic_mutation_response(user_task: str) -> dict[str, Any] | None:
+    """Best-effort deterministic tool_calls for explicit create/edit prompts."""
+    return synthetic_create_file_response(user_task) or synthetic_edit_replace_response(
+        user_task
     )
 
 
@@ -192,11 +394,21 @@ def correction_instruction(
     path: str | None,
     failed_preview: str,
 ) -> str:
+    # Prefer the same imperative shape as user_task_instruction when possible.
+    imperative = user_task_instruction(task)
+    if parse_create_file(task) is not None:
+        return (
+            "Previous structured tool call was unusable and must be replaced.\n"
+            f"Failed tool={tool!r} reason={reason!r} path={path!r}.\n"
+            f"{imperative}"
+        )
     return (
         "Previous structured tool call was unusable and must be replaced.\n"
         f"Failed tool={tool!r} reason={reason!r} path={path!r}.\n"
         f"Failed preview:\n{failed_preview[:500]}\n\n"
         "Emit one correct tool call for the coding task below. "
-        "For file writes, include the full file content.\n\n"
-        f"Task:\n{task}"
+        "For file writes, include path with a real extension and the full "
+        "file content. For edits, oldText and newText must both be non-empty "
+        "and different. Do not emit read-only calls.\n\n"
+        f"{imperative}"
     )

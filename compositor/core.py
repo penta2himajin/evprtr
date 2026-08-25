@@ -19,11 +19,14 @@ from compositor.approvals.buffer import SideEffectBuffer
 from compositor.approvals.store import ApprovalStore
 from compositor.runtimes import ChatRuntime, UpstreamError
 from compositor.tools.maple_nl import (
+    align_create_file_tool_calls,
     assistant_text,
     correction_instruction,
     extract_fenced_files,
     maple_nl_request,
+    parse_create_file,
     prepare_needle_instruction,
+    synthetic_mutation_response,
     task_wants_mutation,
     tool_calls_satisfy_mutation,
     user_task_instruction,
@@ -37,7 +40,8 @@ from compositor.trace import (
     summarize_request,
     summarize_response,
 )
-from compositor.verify.pipeline import VerifyBundle
+from compositor.verify.detectors_tools import DegenerateToolCallDetector
+from compositor.verify.pipeline import VerifyBundle, assistant_message
 from compositor.verify.repair import original_user_text
 
 
@@ -131,6 +135,9 @@ class Compositor:
             raise
 
         upstream, repaired = await self._verify_and_repair(request, upstream, session)
+        upstream = align_create_file_tool_calls(
+            upstream, original_user_text(request)
+        )
 
         try:
             presented = self._present(upstream)
@@ -157,27 +164,21 @@ class Compositor:
         request: dict[str, Any],
     ) -> ComposeResult:
         current = tool_result.response
+        via = getattr(tool_result, "via", "needle_tool_path")
         try:
-            diagnosis = self.verify.diagnose(current, request=request)
-            if diagnosis is not None and diagnosis.kind in {
-                "degenerate_tool_args",
-                "missing_mutation",
-            }:
-                session.event("verify", "error", **diagnosis.event_detail())
-                sanitized = self.verify.sanitize(current, diagnosis)
-                corrected = await self._needle_correct_degenerate(
-                    request, diagnosis, sanitized, session, attempt=0
-                )
-                current = corrected if corrected is not None else sanitized
+            # Full verify loop (Needle correct + re-diagnose + Maple repair).
+            # One-shot correct previously presented still-degenerate edits.
+            current, _repaired = await self._verify_and_repair(
+                request, current, session, allow_needle_correct=True
+            )
+            current = align_create_file_tool_calls(
+                current, original_user_text(request)
+            )
             presented = self._present(current)
             presented, buffered_ids = self._buffer_side_effects(
                 presented, session, session.trace_id
             )
-            session.event(
-                "present",
-                "ok",
-                via=getattr(tool_result, "via", "needle_tool_path"),
-            )
+            session.event("present", "ok", via=via)
         except Exception as exc:  # noqa: BLE001
             session.fail(FailureLocus.PRESENT, str(exc), stage="present")
             session.finish(ok=False)
@@ -187,10 +188,49 @@ class Compositor:
         summary["needle_tool_path"] = bool(tool_result.used_needle) or True
         summary["needle_empty_call"] = tool_result.empty_call
         summary["needle_confidence"] = tool_result.confidence
-        summary["needle_via"] = getattr(tool_result, "via", None)
+        summary["needle_via"] = via
         summary["buffered_approvals"] = buffered_ids
         trace = session.finish(ok=True, response_summary=summary)
         return ComposeResult(response=presented, trace=trace)
+
+    def _nl_needle_acceptable(
+        self,
+        result: ToolPathResult | None,
+        request: dict[str, Any],
+        user_task: str,
+    ) -> tuple[bool, str | None]:
+        """Whether an NL→Needle result is good enough to present (or needs retry)."""
+        if result is None:
+            return False, getattr(self.tool_path, "last_skip_reason", None)
+        if result.empty_call:
+            return False, "empty_call"
+        if task_wants_mutation(user_task) and not tool_calls_satisfy_mutation(
+            result.response
+        ):
+            return False, "missing_mutation"
+        message = assistant_message(result.response)
+        if message is None:
+            return False, "no_message"
+        hit = DegenerateToolCallDetector().diagnose(message, request=request)
+        if hit is not None:
+            detail = hit.detail or {}
+            return False, f"degenerate:{detail.get('reason')}:{detail.get('path')}"
+        return True, None
+
+    def _finalize_nl_result(
+        self, result: ToolPathResult, user_task: str
+    ) -> ToolPathResult:
+        aligned = align_create_file_tool_calls(result.response, user_task)
+        if aligned is result.response:
+            return result
+        return ToolPathResult(
+            response=aligned,
+            used_needle=result.used_needle,
+            confidence=result.confidence,
+            empty_call=result.empty_call,
+            reasoning=result.reasoning,
+            via=result.via,
+        )
 
     def _buffer_side_effects(
         self,
@@ -297,16 +337,18 @@ class Compositor:
         result = await asyncio.to_thread(
             self.tool_path.handle_instruction, needle_input, request
         )
-        if result is not None and task_wants_mutation(user_task):
-            if not tool_calls_satisfy_mutation(result.response):
+        ok, miss_reason = self._nl_needle_acceptable(result, request, user_task)
+        if not ok:
+            if result is not None:
                 session.event(
                     "tool_select",
                     "ok",
-                    phase="needle_mutation_miss",
-                    via=result.via,
+                    phase="needle_quality_miss",
+                    reason=miss_reason,
+                    via=getattr(result, "via", None),
                     policy_id=self.tool_path.policy_id,
                 )
-                result = None
+            result = None
         if result is None:
             # Second chance: clean user-task brief (Maple NL often confuses Needle).
             retry = user_task_instruction(user_task)
@@ -315,7 +357,8 @@ class Compositor:
                     "tool_select",
                     "ok",
                     phase="needle_retry_user_task",
-                    reason=getattr(self.tool_path, "last_skip_reason", None),
+                    reason=miss_reason
+                    or getattr(self.tool_path, "last_skip_reason", None),
                     policy_id=self.tool_path.policy_id,
                 )
                 result = await asyncio.to_thread(
@@ -323,27 +366,49 @@ class Compositor:
                     retry,
                     request,
                 )
-                if (
-                    result is not None
-                    and task_wants_mutation(user_task)
-                    and not tool_calls_satisfy_mutation(result.response)
-                ):
+                ok2, miss2 = self._nl_needle_acceptable(result, request, user_task)
+                if not ok2:
                     session.event(
                         "tool_select",
                         "ok",
-                        phase="needle_retry_still_no_mutation",
+                        phase="needle_retry_still_bad",
+                        reason=miss2,
                         policy_id=self.tool_path.policy_id,
                     )
                     result = None
         if result is None:
+            synthetic = synthetic_mutation_response(user_task)
+            if synthetic is not None:
+                via = (
+                    "synthetic_create_file"
+                    if parse_create_file(user_task)
+                    else "synthetic_edit_replace"
+                )
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="done",
+                    via=via,
+                    policy_id=self.tool_path.policy_id,
+                )
+                return ToolPathResult(
+                    response=synthetic,
+                    used_needle=False,
+                    confidence=None,
+                    empty_call=False,
+                    reasoning="deterministic_mutation",
+                    via=via,
+                )
             session.event(
                 "tool_select",
                 "ok",
                 phase="fallback_maple",
-                reason=getattr(self.tool_path, "last_skip_reason", None),
+                reason=miss_reason
+                or getattr(self.tool_path, "last_skip_reason", None),
                 policy_id=self.tool_path.policy_id,
             )
             return None
+        result = self._finalize_nl_result(result, user_task)
         session.event(
             "tool_select",
             "ok",
@@ -504,18 +569,26 @@ class Compositor:
         del sanitized
         detail = diagnosis.detail or {}
         task = original_user_text(request)
-        if diagnosis.kind == "missing_mutation":
-            from compositor.tools.maple_nl import user_task_instruction
-
-            instruction = user_task_instruction(task)
+        # Prefer imperative create-file / mutation briefs; soft correction alone
+        # often yields another unusable edit (live smoke4).
+        candidates: list[str] = []
+        if diagnosis.kind == "missing_mutation" or parse_create_file(task) is not None:
+            candidates.append(user_task_instruction(task))
         else:
-            instruction = correction_instruction(
-                task=task,
-                tool=detail.get("tool"),
-                reason=detail.get("reason"),
-                path=detail.get("path"),
-                failed_preview=str(detail),
+            candidates.append(
+                correction_instruction(
+                    task=task,
+                    tool=detail.get("tool"),
+                    reason=detail.get("reason"),
+                    path=detail.get("path"),
+                    failed_preview=str(detail),
+                )
             )
+            if task_wants_mutation(task):
+                ut = user_task_instruction(task)
+                if ut not in candidates:
+                    candidates.append(ut)
+
         session.event(
             "repair",
             "ok",
@@ -532,40 +605,94 @@ class Compositor:
                         self.tool_path.apply_chunked_file, fpath, content, request
                     )
                     if chunked is not None:
-                        session.event(
-                            "repair",
-                            "ok",
-                            phase="needle_correct_done",
-                            via=chunked.via,
-                            attempt=attempt + 1,
+                        aligned = align_create_file_tool_calls(
+                            chunked.response, task
                         )
-                        return chunked.response
+                        ok, _ = self._nl_needle_acceptable(
+                            ToolPathResult(
+                                response=aligned,
+                                used_needle=chunked.used_needle,
+                                confidence=chunked.confidence,
+                                empty_call=False,
+                                reasoning=chunked.reasoning,
+                                via=chunked.via,
+                            ),
+                            request,
+                            task,
+                        )
+                        if ok:
+                            session.event(
+                                "repair",
+                                "ok",
+                                phase="needle_correct_done",
+                                via=chunked.via,
+                                attempt=attempt + 1,
+                            )
+                            return aligned
 
-        result = await asyncio.to_thread(
-            partial(
-                self.tool_path.handle_instruction,
-                instruction,
-                request,
-                via="needle_correct_degenerate",
+        for instruction in candidates:
+            result = await asyncio.to_thread(
+                partial(
+                    self.tool_path.handle_instruction,
+                    instruction,
+                    request,
+                    via="needle_correct_degenerate",
+                )
             )
-        )
-        if result is None or result.empty_call:
+            if result is None or result.empty_call:
+                continue
+            aligned = align_create_file_tool_calls(result.response, task)
+            shaped = ToolPathResult(
+                response=aligned,
+                used_needle=result.used_needle,
+                confidence=result.confidence,
+                empty_call=result.empty_call,
+                reasoning=result.reasoning,
+                via=result.via,
+            )
+            ok, reason = self._nl_needle_acceptable(shaped, request, task)
+            if not ok:
+                session.event(
+                    "repair",
+                    "ok",
+                    phase="needle_correct_still_bad",
+                    reason=reason,
+                    attempt=attempt + 1,
+                )
+                continue
             session.event(
                 "repair",
                 "ok",
-                phase="needle_correct_miss",
-                reason=getattr(self.tool_path, "last_skip_reason", None),
+                phase="needle_correct_done",
+                via=result.via,
                 attempt=attempt + 1,
             )
-            return None
+            return aligned
+
+        synthetic = synthetic_mutation_response(task)
+        if synthetic is not None:
+            via = (
+                "synthetic_create_file"
+                if parse_create_file(task)
+                else "synthetic_edit_replace"
+            )
+            session.event(
+                "repair",
+                "ok",
+                phase="needle_correct_done",
+                via=via,
+                attempt=attempt + 1,
+            )
+            return synthetic
+
         session.event(
             "repair",
             "ok",
-            phase="needle_correct_done",
-            via=result.via,
+            phase="needle_correct_miss",
+            reason=getattr(self.tool_path, "last_skip_reason", None),
             attempt=attempt + 1,
         )
-        return result.response
+        return None
 
     def _present(self, upstream: dict[str, Any]) -> dict[str, Any]:
         presented = dict(upstream)

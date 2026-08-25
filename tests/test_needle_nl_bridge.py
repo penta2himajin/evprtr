@@ -192,7 +192,13 @@ async def test_needle_corrects_degenerate_write(tmp_path):
             return True
 
         def complete(self, query, tools, *, max_new_tokens=None):
-            if "unusable" in query.lower() or "Failed tool" in query:
+            q = query.lower()
+            if (
+                "unusable" in q
+                or "failed tool" in q
+                or "call write" in q
+                or "cargo.toml" in q
+            ):
                 return NeedleCompleteResult(
                     function_calls=[
                         {
@@ -252,3 +258,254 @@ async def test_needle_corrects_degenerate_write(tmp_path):
         args = json.loads(args)
     assert args["path"] == "Cargo.toml"
     assert "axum" in args["content"]
+
+
+@pytest.mark.asyncio
+async def test_nl_retries_on_degenerate_write(tmp_path):
+    """Broken write args must not skip user-task retry (smoke4 hole)."""
+
+    class Maple:
+        async def chat_completions(self, payload):
+            assert payload.get("tool_choice") == "none"
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Write path=Tower content=0.5",
+                        }
+                    }
+                ]
+            }
+
+    class RT(NeedleToolRuntime):
+        def __init__(self):
+            self.n = 0
+
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            self.n += 1
+            if "Call write" in query and "live-nl-retry.txt" in query:
+                return NeedleCompleteResult(
+                    function_calls=[
+                        {
+                            "name": "write",
+                            "arguments": {
+                                "path": "live-nl-retry.txt",
+                                "content": "ok-body",
+                            },
+                        }
+                    ],
+                    confidence=0.8,
+                    reasoning=None,
+                    raw={},
+                )
+            return NeedleCompleteResult(
+                function_calls=[
+                    {
+                        "name": "write",
+                        "arguments": {"path": "Tower", "content": "0.5"},
+                    }
+                ],
+                confidence=0.2,
+                reasoning=None,
+                raw={},
+            )
+
+    rt = RT()
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        tool_path=NeedleToolPath(rt),
+        needle_via_maple_nl=True,
+        needle_chunk_writes=False,
+        needle_correct_degenerate=True,
+        buffer_side_effects=False,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Create file live-nl-retry.txt with exactly this content:\n"
+                        "ok-body\n\nUse the write tool."
+                    ),
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                },
+            ],
+        }
+    )
+    assert rt.n >= 2
+    args = result.response["choices"][0]["message"]["tool_calls"][0]["function"][
+        "arguments"
+    ]
+    if isinstance(args, str):
+        args = json.loads(args)
+    assert args["path"] == "live-nl-retry.txt"
+    assert args["content"] == "ok-body"
+    phases = [
+        e.detail.get("phase")
+        for e in result.trace.events
+        if e.stage == "tool_select" and isinstance(e.detail, dict)
+    ]
+    assert "needle_quality_miss" in phases
+    assert "needle_retry_user_task" in phases
+
+
+@pytest.mark.asyncio
+async def test_missing_mutation_read_then_correct_write(tmp_path):
+    """NL miss → Maple read-only settle → MissingMutation → Needle write.
+
+    Task intentionally avoids create-file regex so synthetic fallback does not
+    short-circuit before MissingMutation can fire.
+    """
+
+    class Maple:
+        async def chat_completions(self, payload):
+            if payload.get("tool_choice") == "none":
+                return {
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "hmm"}}
+                    ]
+                }
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_r",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read",
+                                        "arguments": json.dumps(
+                                            {"path": "notes.txt"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+
+    class RT(NeedleToolRuntime):
+        def __init__(self):
+            self.n = 0
+
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            self.n += 1
+            # NL first + NL user-task retry abstain; 3rd call is Needle correct.
+            if self.n >= 3 and "notes.txt" in query and "hello" in query.lower():
+                return NeedleCompleteResult(
+                    function_calls=[
+                        {
+                            "name": "write",
+                            "arguments": {
+                                "path": "notes.txt",
+                                "content": "hello",
+                            },
+                        }
+                    ],
+                    confidence=0.9,
+                    reasoning=None,
+                    raw={},
+                )
+            return NeedleCompleteResult([], 0.0, "abstain", {})
+
+    rt = RT()
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        tool_path=NeedleToolPath(rt),
+        needle_via_maple_nl=True,
+        needle_chunk_writes=False,
+        needle_correct_degenerate=True,
+        buffer_side_effects=False,
+        repair_attempts=2,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Implement notes.txt so it contains exactly hello. "
+                        "Use the write tool; do not stop after read."
+                    ),
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                },
+            ],
+        }
+    )
+    call = result.response["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "write"
+    args = call["function"]["arguments"]
+    if isinstance(args, str):
+        args = json.loads(args)
+    assert args["path"] == "notes.txt"
+    assert args["content"] == "hello"
+    assert rt.n >= 3
+    kinds = [
+        e.detail.get("kind")
+        for e in result.trace.events
+        if e.stage == "verify" and isinstance(e.detail, dict)
+    ]
+    assert "missing_mutation" in kinds
