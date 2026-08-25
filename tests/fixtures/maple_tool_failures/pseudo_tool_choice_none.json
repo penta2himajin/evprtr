@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-pseudo-tool",
+  "object": "chat.completion",
+  "model": "maple-preview-TQ2_0-head-Q4_K.gguf",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "I'll get the current weather in Tokyo for you.\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Tokyo\"}}\n</tool_call>",
+        "reasoning_content": "The user asked for live weather but tool_choice was none; model leaked markup into content."
+      }
+    }
+  ],
+  "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+  "_probe": {
+    "case": "tool_choice_none_live_weather",
+    "note": "Captured shape from 2026-08-25 live Maple probe; see docs/findings/maple-preview-probe-2026-08-25.md"
+  }
+}

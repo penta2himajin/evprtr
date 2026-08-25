@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-omit-required",
+  "object": "chat.completion",
+  "model": "maple-preview-TQ2_0-head-Q4_K.gguf",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "length",
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning_head_note": "full reasoning omitted; live probe often collapsed without tool_calls",
+        "reasoning_content": "The user asked to call get_weather with unit=celsius but omit the required city field. This conflicts with the schema. Thinking about how to proceed without producing a valid tool call..."
+      }
+    }
+  ],
+  "_probe": {
+    "case": "tool_omit_required_city",
+    "note": "Instruction/schema conflict; often no structured tool_calls. Candidate for future Needle/schema policy."
+  }
+}

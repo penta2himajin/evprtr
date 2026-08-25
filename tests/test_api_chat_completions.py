@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from compositor.api import build_app
+from compositor.core import Compositor
+
+
+class FakeRuntime:
+    def __init__(self, response: dict[str, Any] | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.response = response or {
+            "id": "chatcmpl-upstream",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "maple-upstream",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello from upstream"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        }
+
+    async def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(payload)
+        return dict(self.response)
+
+
+@pytest.fixture
+def fake_runtime() -> FakeRuntime:
+    return FakeRuntime()
+
+
+@pytest.fixture
+async def client(fake_runtime: FakeRuntime, tmp_path):
+    from compositor.trace import TraceStore
+
+    store = TraceStore(tmp_path)
+    app = build_app(Compositor(fake_runtime, public_model_id="evprtr", traces=store))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac, fake_runtime, store
+
+
+@pytest.mark.asyncio
+async def test_lists_public_model(client):
+    ac, _, _ = client
+    response = await ac.get("/v1/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "list"
+    assert data["data"][0]["id"] == "evprtr"
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_passthrough_rewrites_model_id(client):
+    ac, runtime, store = client
+    response = await ac.post(
+        "/v1/chat/completions",
+        json={
+            "model": "evprtr",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "evprtr"
+    assert body["choices"][0]["message"]["content"] == "hello from upstream"
+    assert runtime.calls[0]["messages"][0]["content"] == "hi"
+    trace_id = response.headers.get("x-evprtr-trace-id")
+    assert trace_id
+    assert store.get(trace_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_stream_rejected_in_v0_with_accept_locus(client):
+    ac, _, store = client
+    response = await ac.post(
+        "/v1/chat/completions",
+        json={
+            "model": "evprtr",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["locus"] == "accept"
+    assert store.get(detail["trace_id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_missing_upstream_returns_502_with_trace(tmp_path):
+    from compositor.trace import TraceStore
+
+    app = build_app(traces=TraceStore(tmp_path))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post(
+            "/v1/chat/completions",
+            json={"model": "evprtr", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["locus"] == "upstream"
+    assert detail["trace_id"]
+
+
+@pytest.mark.asyncio
+async def test_get_trace_endpoint(client):
+    ac, _, _ = client
+    posted = await ac.post(
+        "/v1/chat/completions",
+        json={"model": "evprtr", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    trace_id = posted.headers["x-evprtr-trace-id"]
+    response = await ac.get(f"/v1/traces/{trace_id}")
+    assert response.status_code == 200
+    assert response.json()["trace_id"] == trace_id
+    assert response.json()["ok"] is True
