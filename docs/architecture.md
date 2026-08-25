@@ -79,17 +79,26 @@ Engine default path on the author machine: `F:/LLM/models/needle2/libneedle.dll`
 
 Trace stage: `tool_select`. Summary flags: `needle_tool_path`, `needle_empty_call`, `needle_confidence`.
 
-## Side-effect buffer / approvals
+## Side-effect control
 
-Risky tool calls (`write`, `bash`, `web_search`, …) are **not** returned to the harness for immediate execution. They are enqueued:
+Two peelable approaches (do not enable both for the same Pi run):
+
+### Path B (recommended for normal Pi agent loops)
+
+Gate execution inside the harness with [`harness/pi/evprtr-side-effect-gate.ts`](../harness/pi/evprtr-side-effect-gate.ts). Set `EVPRTR_BUFFER_SIDE_EFFECTS=0` so `tool_calls` reach Pi. `read` / `grep` / `find` / `ls` pass; `bash` / `write` / `edit` / `powershell` require confirmation (blocked in non-interactive `-p`). Audit via `POST /v1/approvals`. See [`harness/pi/README.md`](../harness/pi/README.md).
+
+### Path A (compositor response buffer)
+
+Risky tool calls (`write`, `bash`, …) are **not** returned to the harness for immediate execution. They are enqueued:
 
 | API | Role |
 |---|---|
+| `POST /v1/approvals` | Enqueue (harness gate / supervisor) |
 | `GET /v1/approvals` | List pending/decided actions |
 | `POST /v1/approvals/{id}/approve` / `reject` | Human/supervisor decision |
 | `POST /v1/approvals/{id}/apply` | v0: record apply only (no host exec yet) |
 
-Safe tools (`read`, `grep`, …) still pass through. Disable buffering with `EVPRTR_BUFFER_SIDE_EFFECTS=0`. Header `X-Evprtr-Approvals` lists enqueued ids.
+Safe tools (`read`, `grep`, …) still pass through. Enable with `EVPRTR_BUFFER_SIDE_EFFECTS=1` (default). Header `X-Evprtr-Approvals` lists enqueued ids.
 
 Trace stages: `verify`, `repair`, `approval_buffer`. Response summary includes `repetition_repaired`, `buffered_approvals`.
 

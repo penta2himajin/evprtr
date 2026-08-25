@@ -36,6 +36,15 @@ class ApprovalDecisionBody(BaseModel):
     note: str | None = None
 
 
+class ApprovalEnqueueBody(BaseModel):
+    tool_name: str
+    arguments: str = "{}"
+    raw_tool_call: dict[str, Any] | None = None
+    reason: str | None = None
+    tags: list[str] | None = None
+    trace_id: str | None = None
+
+
 def build_app(
     compositor: Compositor | None = None,
     *,
@@ -117,6 +126,23 @@ def build_app(
     async def list_approvals(status: str | None = None, limit: int = 50) -> dict[str, Any]:
         items = app.state.approvals.list(status=status, limit=limit)
         return {"object": "list", "data": [a.to_dict() for a in items]}
+
+    @app.post("/v1/approvals")
+    async def enqueue_approval(body: ApprovalEnqueueBody) -> dict[str, Any]:
+        """Enqueue a pending action from a harness gate (path B) or other supervisor."""
+        raw = body.raw_tool_call or {
+            "type": "function",
+            "function": {"name": body.tool_name, "arguments": body.arguments},
+        }
+        action = app.state.approvals.enqueue(
+            tool_name=body.tool_name,
+            arguments=body.arguments,
+            raw_tool_call=raw,
+            trace_id=body.trace_id,
+            reason=body.reason or "enqueued via POST /v1/approvals",
+            tags=body.tags,
+        )
+        return action.to_dict()
 
     @app.get("/v1/approvals/{action_id}")
     async def get_approval(action_id: str) -> dict[str, Any]:

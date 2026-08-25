@@ -135,3 +135,24 @@ async def test_get_trace_endpoint(client):
     assert response.status_code == 200
     assert response.json()["trace_id"] == trace_id
     assert response.json()["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_enqueue_approval_via_post(client):
+    ac, _, _ = client
+    response = await ac.post(
+        "/v1/approvals",
+        json={
+            "tool_name": "bash",
+            "arguments": '{"command":"echo hi"}',
+            "reason": "pi gate audit",
+            "tags": ["pi_gate"],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"].startswith("appr-")
+    assert body["tool_name"] == "bash"
+    assert body["status"] == "pending"
+    listed = await ac.get("/v1/approvals", params={"status": "pending"})
+    assert any(item["id"] == body["id"] for item in listed.json()["data"])

@@ -10,7 +10,7 @@
 
 ## 現状
 
-OpenAI 互換 API（`stream=true` は内部で非ストリーム実行して SSE に包む shim）、失敗トレース、反復／偽 tool マークアップの verify・repair、Needle 2 による tool 確定パス、副作用 tool の approvals buffer まで。
+OpenAI 互換 API（`stream=true` SSE shim）、失敗トレース、verify/repair、Needle tool パス、compositor 側 buffer（path A）、**Pi harness ゲート**（path B: `harness/pi/`）まで。
 
 ## クイックスタート
 
