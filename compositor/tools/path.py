@@ -92,11 +92,19 @@ class NeedleToolPath:
                 reasoning=result.reasoning,
             )
 
-        # Empty call []: schema conflict, off-topic, or no matching tool.
-        if choice == "required" or isinstance(choice, dict):
-            content = _refusal_required(result, needle_tools)
-        else:
-            content = _refusal_auto(result)
+        # Empty call [] under auto: Needle abstained. Presenting a prose refusal
+        # kills the Pi agent loop before Maple can emit structured tool_calls
+        # (seen with Pi write/bash schemas → "No tool exists..."). Fall back.
+        if choice not in {"required"} and not isinstance(choice, dict):
+            reason = (result.reasoning or "").strip().replace("\n", " ")
+            self.last_skip_reason = (
+                f"empty_call_fallback conf={result.confidence} "
+                f"reasoning={reason[:160]!r}"
+            )
+            return None
+
+        # tool_choice required / forced function: keep an explicit refusal.
+        content = _refusal_required(result, needle_tools)
         message = {"role": "assistant", "content": content, "tool_calls": None}
         return ToolPathResult(
             response=self._wrap(message, finish_reason="stop"),
@@ -134,13 +142,3 @@ def _refusal_required(result: NeedleCompleteResult, tools: list[dict[str, Any]])
     if reason:
         return f"{base}\n\nDetails: {reason}"
     return base
-
-
-def _refusal_auto(result: NeedleCompleteResult) -> str:
-    reason = (result.reasoning or "").strip()
-    if reason:
-        return reason
-    return (
-        "No matching tool call was made. The available tools cannot satisfy "
-        "this request, or required arguments were missing."
-    )

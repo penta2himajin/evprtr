@@ -197,3 +197,50 @@ def test_last_user_text_skips_stub_continue():
     )
     assert "Implement the HTTP server" in text
     assert text != "continue"
+
+
+def test_tool_path_empty_call_auto_falls_back_to_maple():
+    class RT(NeedleToolRuntime):
+        def available(self):
+            return True
+
+        def complete(self, query, tools):
+            return NeedleCompleteResult(
+                function_calls=[],
+                confidence=0.03,
+                reasoning="No tool exists for creating files",
+                raw={},
+            )
+
+    path = NeedleToolPath(RT())
+    result = path.handle(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Create rpc-smoke.txt with write tool only.",
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                            "required": ["path", "content"],
+                        },
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+        }
+    )
+    assert result is None
+    assert path.last_skip_reason is not None
+    assert "empty_call_fallback" in path.last_skip_reason
+
