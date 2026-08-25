@@ -20,18 +20,19 @@
 - Path B gate audited and ran real `bash` under the old AUTO_APPROVE experiment
 - Stream shim + Maple upstream healthy after swap
 - Gate now blocks non-UI (`-p`) and expects TUI or RPC `decide`
+- **RPC smoke (2026-08-25):** `write` → `PENDING_APPROVAL` → `decide --approve` → file written (`rpc-ok`)
+- Needle `empty_call` under `tool_choice=auto` now **falls back to Maple** (`empty_call_fallback`) instead of ending the Pi turn with “No tool exists…”
 
 ## What blocked implementation
 
 1. **Repair / pseudo-tool loop** still turns coding turns into short prose (`Ready` / `Understood`) when structured tools fail — mitigated by agentic repair + primary-task keep.
-2. **Needle** still `fallback_maple` often — now logs `reason` on that phase; query picks last substantial user turn.
+2. **Needle** often abstains (`empty_call`, conf≈0.03) on Pi `write` schemas — fixed by Maple fallback; structured Needle wins still preferred when it emits calls.
 3. **Maple task adherence**: preferred exploratory `bash` / `mkdir` over `write` for Cargo.toml.
 4. **Windows + bash redirects**: heredoc write corrupted `Cargo.toml` (restored). Deferred until write/edit path is the active work item.
 5. Occasional Pi requests arrived with **`has_tools: false`** when `--tools` was narrowed.
 
 ## Next improvements (priority)
 
-1. ~~Repair: preserve primary user task~~ / ~~pseudo-tool keeps tools when present~~
-2. Drive tinyserve micro-steps through RPC approve loop; watch Needle `reason=` on fallback.
-3. Needle: act on logged skip reasons (convert / query / confidence).
-4. Gate policy (optional, later): on Windows, warn/block `bash` file redirects in favor of `write`/`edit`.
+1. Drive tinyserve micro-steps through RPC approve loop (gate verified).
+2. Needle: act on logged skip reasons when convert/query/confidence still fail.
+3. Gate policy (optional, later): on Windows, warn/block `bash` file redirects in favor of `write`/`edit`.
