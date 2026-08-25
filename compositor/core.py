@@ -272,19 +272,27 @@ class Compositor:
             return None
 
         instruction = assistant_text(maple_out)
+        maple_nl_source = "content"
         # Prefer content; if Maple stuffed the plan into reasoning only, use that.
         if not instruction:
             choices = maple_out.get("choices") or []
             if choices and isinstance(choices[0], dict):
                 msg = choices[0].get("message") or {}
                 reasoning = msg.get("reasoning_content")
-                if isinstance(reasoning, str):
+                if isinstance(reasoning, str) and reasoning.strip():
                     instruction = reasoning.strip()
+                    maple_nl_source = "reasoning_content"
+                else:
+                    maple_nl_source = "empty"
+            else:
+                maple_nl_source = "empty"
         user_task = original_user_text(request)
         session.event(
             "tool_select",
             "ok",
             phase="maple_nl_done",
+            maple_nl=instruction,
+            maple_nl_source=maple_nl_source,
             instruction_len=len(instruction),
             policy_id=self.tool_path.policy_id,
         )
@@ -294,6 +302,7 @@ class Compositor:
                 "tool_select",
                 "ok",
                 phase="maple_nl_empty_use_task",
+                maple_nl=instruction,
                 policy_id=self.tool_path.policy_id,
             )
 
@@ -302,6 +311,7 @@ class Compositor:
             "tool_select",
             "ok",
             phase="needle_instruction_ready",
+            needle_instruction=needle_input,
             needle_instruction_len=len(needle_input),
             policy_id=self.tool_path.policy_id,
         )
@@ -357,6 +367,8 @@ class Compositor:
                     "tool_select",
                     "ok",
                     phase="needle_retry_user_task",
+                    needle_instruction=retry,
+                    needle_instruction_len=len(retry),
                     reason=miss_reason or getattr(self.tool_path, "last_skip_reason", None),
                     policy_id=self.tool_path.policy_id,
                 )

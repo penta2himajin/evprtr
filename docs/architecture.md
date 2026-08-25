@@ -44,7 +44,8 @@ Every `/v1/chat/completions` attempt gets a trace id (`X-Evprtr-Trace-Id`).
 |---|---|
 | `locus` | Which stage failed: `accept`, `upstream`, `present` (later: plan / tool_select / execute / verify / repair), or `none` |
 | events | Ordered stage markers (`ok` / `error`) with timestamps |
-| request/response summaries | Counts, roles, finish reasons — **not** full message bodies |
+| request/response summaries | Counts, roles, finish reasons — **not** full harness message bodies |
+| maple_nl / needle_instruction | Full Maple NL and Needle input strings on `tool_select` events (measurement fidelity) |
 | persistence | JSON under `EVPRTR_TRACE_DIR` (default `.evprtr/traces/`) |
 | HTTP | `GET /v1/traces`, `GET /v1/traces/{id}` |
 

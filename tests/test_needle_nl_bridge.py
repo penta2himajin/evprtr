@@ -181,6 +181,14 @@ async def test_maple_nl_then_needle(tmp_path):
     msg = result.response["choices"][0]["message"]
     assert msg.get("tool_calls")
     assert result.trace.response_summary.get("needle_via")
+    nl_done = next(e for e in result.trace.events if e.detail.get("phase") == "maple_nl_done")
+    assert nl_done.detail["maple_nl"].startswith("Use write on Cargo.toml")
+    assert nl_done.detail["maple_nl_source"] == "content"
+    assert "axum" in nl_done.detail["maple_nl"]
+    ready = next(
+        e for e in result.trace.events if e.detail.get("phase") == "needle_instruction_ready"
+    )
+    assert "Cargo.toml" in ready.detail["needle_instruction"]
 
 
 @pytest.mark.asyncio
