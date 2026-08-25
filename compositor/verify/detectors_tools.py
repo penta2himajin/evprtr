@@ -140,6 +140,19 @@ class DegenerateToolCallDetector:
                 return {"reason": "empty_edit_texts", "path": path}
             if old and old == new:
                 return {"reason": "noop_edit", "path": path, "old_len": len(old)}
+            # Prompt-echo / meta text often appears as invented oldText (live tinyserve).
+            low = old.lower()
+            if any(
+                tok in low
+                for tok in (
+                    "non-empty oldtext",
+                    "oldtext and newtext",
+                    "mutation tool",
+                    "use the edit",
+                    "do not only",
+                )
+            ):
+                return {"reason": "invented_old_text", "path": path}
             if old and len(old) < 80 and "tokio {version" in old.replace(" ", ""):
                 # Seen live: invented oldText that never exists in the file.
                 return {"reason": "invented_old_text", "path": path}

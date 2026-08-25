@@ -95,9 +95,7 @@ def parse_create_file(user_task: str) -> tuple[str, str] | None:
     path = m.group("path").strip()
     body = m.group("body").strip()
     body = re.split(r"(?i)\n\s*use the write", body)[0].strip()
-    # Keep only the first paragraph — later lines are usually harness instructions
-    # ("You may read first…", "Do not stop after read.").
-    body = re.split(r"\n\s*\n", body, maxsplit=1)[0].strip()
+    # Keep blank lines inside file bodies; only cut trailing harness blurbs.
     trimmed: list[str] = []
     for line in body.splitlines():
         if re.match(
@@ -106,7 +104,7 @@ def parse_create_file(user_task: str) -> tuple[str, str] | None:
         ):
             break
         trimmed.append(line)
-    body = "\n".join(trimmed).strip()
+    body = "\n".join(trimmed).rstrip()
     if not path or not body:
         return None
     return path, body
