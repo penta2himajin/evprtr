@@ -15,17 +15,24 @@ class OpenAICompatRuntime:
         base_url: str,
         *,
         upstream_model: str | None = None,
+        api_key: str | None = None,
         timeout: float = 600.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.upstream_model = upstream_model
+        self.api_key = api_key
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout)
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+    def _headers(self) -> dict[str, str]:
+        if not self.api_key:
+            return {}
+        return {"Authorization": f"Bearer {self.api_key}"}
 
     async def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = dict(payload)
@@ -36,7 +43,7 @@ class OpenAICompatRuntime:
 
         url = f"{self.base_url}/chat/completions"
         try:
-            response = await self._client.post(url, json=body)
+            response = await self._client.post(url, json=body, headers=self._headers())
         except httpx.HTTPError as exc:
             raise UpstreamError(f"upstream request failed: {exc}") from exc
 

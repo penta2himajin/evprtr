@@ -10,9 +10,71 @@ import uuid
 from typing import Any
 
 _FENCE = re.compile(r"```(?:[\w.+-]*)\n([\s\S]*?)```", re.MULTILINE)
-_PATH_HINT = re.compile(
-    r"(?i)(?:write|create|update|save|path)\s*[:=]\s*[`\"]?([\w./\\-]+\.\w+)"
-)
+_PATH_HINT = re.compile(r"(?i)(?:write|create|update|save|path)\s*[:=]\s*[`\"]?([\w./\\-]+\.\w+)")
+# Maple NL contract for "tools not needed this turn" (Needle [] → stop, not FB).
+_NO_TOOL_CALL_MARKER = re.compile(r"(?im)^\s*no tool call needed\.?\s*")
+_MIN_NO_TOOL_BODY = 40
+
+
+def is_no_tool_call_nl(text: str) -> bool:
+    """True when Maple NL explicitly opts out of tool calls (marker present)."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if "<tool_call>" in raw.lower():
+        return False
+    if not _NO_TOOL_CALL_MARKER.search(raw):
+        return False
+    body = strip_no_tool_call_marker(raw)
+    return len(body) >= _MIN_NO_TOOL_BODY
+
+
+def strip_no_tool_call_marker(text: str) -> str:
+    """Remove ``No tool call needed.`` lines; return the answer body."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    # Drop marker-only lines; keep the rest.
+    lines: list[str] = []
+    for line in raw.splitlines():
+        if re.match(r"(?i)^\s*no tool call needed\.?\s*$", line):
+            continue
+        # Same marker glued to the first sentence on one line.
+        cleaned = _NO_TOOL_CALL_MARKER.sub("", line, count=1)
+        lines.append(cleaned)
+    return "\n".join(lines).strip()
+
+
+def no_tool_call_assistant_content(maple_nl: str, *, user_task: str) -> str | None:
+    """Stop-content when NL is an intentional no-tool answer; else None."""
+    if not is_no_tool_call_nl(maple_nl):
+        return None
+    if task_wants_mutation(user_task):
+        return None
+    body = strip_no_tool_call_marker(maple_nl)
+    return body if body else None
+
+
+def no_tool_call_stop_response(content: str, *, model: str = "evprtr") -> dict[str, Any]:
+    """OpenAI chat.completion with finish_reason=stop (no tool_calls)."""
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": None,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
 
 
 def maple_nl_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -21,15 +83,17 @@ def maple_nl_request(request: dict[str, Any]) -> dict[str, Any]:
     payload.pop("tools", None)
     payload["tool_choice"] = "none"
     system = (
-        "You are a coding-agent planner. Describe the next tool actions in clear "
+        "You are a coding-agent planner. Describe the next step in clear "
         "natural language for a structured tool engine.\n"
+        "Choose exactly one mode:\n"
+        "1) Tools needed: at most 8 short imperative lines. Name the tool "
+        "(write, edit, read, bash, ls, grep, find, …), paths, and exact file "
+        "contents when writing. For small files, put the full body in a "
+        "markdown fence labeled with the path (example: ```live-nl-smoke.txt).\n"
+        '2) Tools not needed: start with exactly "No tool call needed." then '
+        "the full answer the user should see. Do not name tools in this mode.\n"
         "Rules:\n"
-        "- At most 8 short lines.\n"
         "- Do not emit <tool_call> markup or JSON tool calls.\n"
-        "- Name the tool (write, edit, read, bash, …), paths, and exact file "
-        "contents when writing files.\n"
-        "- For small files, put the full body in a markdown fence labeled with "
-        "the path (example: ```live-nl-smoke.txt).\n"
         "- Never repeat tokens or pad with filler."
     )
     messages = list(payload.get("messages") or [])
@@ -142,9 +206,104 @@ def user_task_instruction(user_task: str, *, limit: int = 1200) -> str:
     )
 
 
-def align_create_file_tool_calls(
-    response: dict[str, Any], user_task: str
-) -> dict[str, Any]:
+def needle_retry_instruction(
+    *,
+    maple_nl: str,
+    user_task: str,
+    tool_names: list[str],
+    limit: int = 160,
+) -> str:
+    """Second-chance Needle query after Maple NL → Needle abstains or misfires.
+
+    Needle 2 uses a 256-token sliding window with tools pinned as sinks; official
+    examples are short imperatives (``Call ls. path="."``), not essays. Soft
+    user-task briefs and long “do not invent write/sms” lists made live abstains
+    worse. Keep create-file on the proven ``Call write. path=...`` shape.
+    """
+    task = (user_task or "").strip()
+    if parse_create_file(task) is not None:
+        return user_task_instruction(task, limit=max(limit, 400))
+
+    names = [str(n) for n in tool_names if n]
+    if not names:
+        return "Call the needed tool now."[:limit]
+
+    nl = (maple_nl or "").strip()
+    chosen = _retry_pick_tool(nl, names)
+    path = _retry_pick_path(nl)
+
+    if chosen == "ls":
+        ls_path = path or "."
+        # A bare filename in a list+read plan belongs to read, not ls.
+        if re.search(r"\.\w{1,12}$", ls_path) and "/" not in ls_path and "\\" not in ls_path:
+            ls_path = "."
+        return f'Call ls. path="{ls_path}"'[:limit]
+    if chosen == "read":
+        return f'Call read. path="{path or "README.md"}"'[:limit]
+    if chosen == "grep":
+        pat = _retry_pick_grep_pattern(nl) or (path or "TODO")
+        return f'Call grep. pattern="{pat}"'[:limit]
+    if chosen == "find":
+        return f'Call find. pattern="{path or "*"}"'[:limit]
+    if chosen == "write" and path:
+        return f'Call write. path="{path}"'[:limit]
+    if chosen == "edit" and path:
+        return f'Call edit. path="{path}"'[:limit]
+
+    # Generic: one short imperative naming the allowlisted tool only.
+    hint = re.sub(r"\s+", " ", nl.splitlines()[0] if nl else "").strip()[:64]
+    if hint:
+        return f"Call {chosen}. {hint}"[:limit]
+    return f"Call {chosen}."[:limit]
+
+
+_PATH_IN_NL = re.compile(
+    r"""(?ix)
+    (?:path\s*[=:]\s*|file\s*[=:]\s*)[`'"]?([\w./\\-]+\.\w{1,12})
+    | [`'"]([\w./\\-]+\.\w{1,12})[`'"]
+    | \b([\w./-]+\.(?:md|txt|py|ts|tsx|js|json|toml|yml|yaml|rs|go))\b
+    """
+)
+
+
+def _retry_pick_tool(maple_nl: str, names: list[str]) -> str:
+    """Prefer the first allowlisted tool name that appears in the NL text."""
+    lower = (maple_nl or "").lower()
+    hits: list[tuple[int, str]] = []
+    for name in names:
+        match = re.search(rf"\b{re.escape(name.lower())}\b", lower)
+        if match:
+            hits.append((match.start(), name))
+    if hits:
+        hits.sort(key=lambda item: item[0])
+        return hits[0][1]
+    for preferred in ("ls", "read", "grep", "find", "write", "edit", "bash"):
+        if preferred in names:
+            return preferred
+    return names[0]
+
+
+def _retry_pick_path(maple_nl: str) -> str | None:
+    match = _PATH_IN_NL.search(maple_nl or "")
+    if not match:
+        return None
+    for g in match.groups():
+        if g:
+            return g.strip().strip("`\"'")
+    return None
+
+
+def _retry_pick_grep_pattern(maple_nl: str) -> str | None:
+    match = re.search(
+        r"(?i)(?:pattern|query|search(?:\s+for)?)\s*[=:]\s*[`'\"]?([^\s`'\"]+)",
+        maple_nl or "",
+    )
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def align_create_file_tool_calls(response: dict[str, Any], user_task: str) -> dict[str, Any]:
     """Force write path/content to match an explicit create-file user task.
 
     Needle sometimes mangles paths (e.g. ``file_live-nl-smoke.txt``). When the
@@ -223,9 +382,7 @@ def synthetic_create_file_response(user_task: str) -> dict[str, Any] | None:
                 "type": "function",
                 "function": {
                     "name": "write",
-                    "arguments": json.dumps(
-                        {"path": path, "content": body}, ensure_ascii=False
-                    ),
+                    "arguments": json.dumps({"path": path, "content": body}, ensure_ascii=False),
                 },
             }
         ],
@@ -235,9 +392,7 @@ def synthetic_create_file_response(user_task: str) -> dict[str, Any] | None:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": "evprtr",
-        "choices": [
-            {"index": 0, "message": message, "finish_reason": "tool_calls"}
-        ],
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
@@ -292,18 +447,14 @@ def synthetic_edit_replace_response(user_task: str) -> dict[str, Any] | None:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": "evprtr",
-        "choices": [
-            {"index": 0, "message": message, "finish_reason": "tool_calls"}
-        ],
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
 
 def synthetic_mutation_response(user_task: str) -> dict[str, Any] | None:
     """Best-effort deterministic tool_calls for explicit create/edit prompts."""
-    return synthetic_create_file_response(user_task) or synthetic_edit_replace_response(
-        user_task
-    )
+    return synthetic_create_file_response(user_task) or synthetic_edit_replace_response(user_task)
 
 
 def task_wants_mutation(user_task: str) -> bool:
@@ -356,6 +507,20 @@ def assistant_text(upstream: dict[str, Any]) -> str:
                     parts.append(t.strip())
         return "\n".join(parts)
     return ""
+
+
+def maple_message_channels(upstream: dict[str, Any]) -> tuple[str, str]:
+    """Return (content, reasoning_content) from a Maple chat.completion body."""
+    choices = upstream.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return "", ""
+    message = choices[0].get("message") or {}
+    content = assistant_text(upstream)
+    reasoning = message.get("reasoning_content")
+    if not isinstance(reasoning, str):
+        reasoning = message.get("reasoning")
+    reasoning_s = reasoning.strip() if isinstance(reasoning, str) else ""
+    return content, reasoning_s
 
 
 def extract_fenced_files(text: str) -> list[tuple[str, str]]:

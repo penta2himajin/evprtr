@@ -9,6 +9,7 @@ from compositor.tools.convert import (
 )
 from compositor.tools.path import NeedleToolPath
 
+
 OPENAI_TOOLS = [
     {
         "type": "function",
