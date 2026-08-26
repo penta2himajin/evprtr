@@ -21,11 +21,13 @@ from compositor.runtimes import ChatRuntime, UpstreamError
 from compositor.tools.convert import openai_tools_to_needle
 from compositor.tools.maple_nl import (
     align_create_file_tool_calls,
-    assistant_text,
     correction_instruction,
     extract_fenced_files,
+    maple_message_channels,
     maple_nl_request,
     needle_retry_instruction,
+    no_tool_call_assistant_content,
+    no_tool_call_stop_response,
     parse_create_file,
     prepare_needle_instruction,
     synthetic_mutation_response,
@@ -34,6 +36,10 @@ from compositor.tools.maple_nl import (
     user_task_instruction,
 )
 from compositor.tools.path import NeedleToolPath, ToolPathResult
+from compositor.tools.pseudo_tool import (
+    apply_pseudo_tool_calls_to_response,
+    parse_pseudo_tool_calls,
+)
 from compositor.trace import (
     FailureLocus,
     TraceRecord,
@@ -78,6 +84,7 @@ class Compositor:
         needle_via_maple_nl: bool | None = None,
         needle_correct_degenerate: bool | None = None,
         needle_chunk_writes: bool | None = None,
+        maple_tools_primary: bool | None = None,
     ) -> None:
         self.runtime = runtime
         self.public_model_id = public_model_id
@@ -106,6 +113,13 @@ class Compositor:
             if needle_chunk_writes is None
             else needle_chunk_writes
         )
+        # Experiment: Maple-with-tools first; Needle only repairs broken calls.
+        # Prose stop skips Needle entirely (avoids NL→tool misfires).
+        self.maple_tools_primary = (
+            _env_flag("EVPRTR_MAPLE_TOOLS_PRIMARY", "0")
+            if maple_tools_primary is None
+            else maple_tools_primary
+        )
 
     async def chat_completions(self, request: dict[str, Any]) -> ComposeResult:
         session = self.traces.start(
@@ -113,6 +127,9 @@ class Compositor:
             request_summary=summarize_request(request),
         )
         session.event("accept", "ok")
+
+        if self.maple_tools_primary and request.get("tools"):
+            return await self._maple_tools_primary_path(request, session)
 
         # Preferred: Maple NL plan → Needle structures (and optional chunk apply).
         nl_result = await self._maybe_maple_nl_needle(request, session)
@@ -123,6 +140,11 @@ class Compositor:
         if tool_result is not None:
             return await self._finish_tool_result(tool_result, session, request)
 
+        return await self._maple_with_tools_finish(request, session)
+
+    async def _maple_with_tools_finish(
+        self, request: dict[str, Any], session: TraceSession
+    ) -> ComposeResult:
         try:
             session.event("upstream_call", "ok", phase="start", runtime="maple")
             upstream = await self.runtime.chat_completions(request)
@@ -153,6 +175,112 @@ class Compositor:
         summary = summarize_response(presented)
         summary["repetition_repaired"] = repaired
         summary["needle_tool_path"] = False
+        summary["buffered_approvals"] = buffered_ids
+        trace = session.finish(ok=True, response_summary=summary)
+        return ComposeResult(response=presented, trace=trace)
+
+    async def _maple_tools_primary_path(
+        self, request: dict[str, Any], session: TraceSession
+    ) -> ComposeResult:
+        """Maple-with-tools first; Needle only repairs broken/structured misses.
+
+        - Valid ``tool_calls`` → verify (Needle correct on degenerate).
+        - Pseudo ``<tool_call>`` markup → deterministic promote.
+        - Prose content without tools → stop (do not send essays to Needle).
+        """
+        session.event(
+            "tool_select",
+            "ok",
+            phase="maple_tools_primary",
+            policy_id="maple_tools_primary.v0",
+        )
+        try:
+            session.event("upstream_call", "ok", phase="start", runtime="maple")
+            upstream = await self.runtime.chat_completions(request)
+            session.event("upstream_call", "ok", phase="done", runtime="maple")
+        except UpstreamError as exc:
+            session.fail(FailureLocus.UPSTREAM, str(exc), stage="upstream_call")
+            session.finish(ok=False)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            session.fail(FailureLocus.UPSTREAM, f"unexpected: {exc}", stage="upstream_call")
+            session.finish(ok=False)
+            raise
+
+        maple_content, maple_reasoning = maple_message_channels(upstream)
+        msg = assistant_message(upstream) or {}
+        structured = msg.get("tool_calls") or []
+        session.event(
+            "tool_select",
+            "ok",
+            phase="maple_tools_done",
+            maple_content=maple_content,
+            maple_reasoning=maple_reasoning,
+            has_tool_calls=bool(structured),
+            presented_tool_calls=_presented_tool_calls(upstream),
+            policy_id="maple_tools_primary.v0",
+        )
+
+        via = "maple_tools_primary"
+        if not structured and isinstance(msg.get("content"), str):
+            pseudo = parse_pseudo_tool_calls(msg["content"])
+            if pseudo:
+                upstream = apply_pseudo_tool_calls_to_response(upstream, pseudo)
+                via = "pseudo_tool_promoted"
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="pseudo_tool_promoted",
+                    n_calls=len(pseudo),
+                    presented_tool_calls=_presented_tool_calls(upstream),
+                    policy_id="maple_tools_primary.v0",
+                )
+            elif len(maple_content.strip()) >= 40:
+                # Intentional answer — do not Needle-structure prose.
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="maple_prose_stop",
+                    content_len=len(maple_content),
+                    policy_id="maple_tools_primary.v0",
+                )
+                try:
+                    presented = self._present(upstream)
+                    presented, buffered_ids = self._buffer_side_effects(
+                        presented, session, session.trace_id
+                    )
+                    session.event("present", "ok", via=via, prose_stop=True)
+                except Exception as exc:  # noqa: BLE001
+                    session.fail(FailureLocus.PRESENT, str(exc), stage="present")
+                    session.finish(ok=False)
+                    raise
+                summary = summarize_response(presented)
+                summary["repetition_repaired"] = False
+                summary["needle_tool_path"] = False
+                summary["maple_tools_primary"] = True
+                summary["needle_via"] = "maple_prose_stop"
+                summary["buffered_approvals"] = buffered_ids
+                trace = session.finish(ok=True, response_summary=summary)
+                return ComposeResult(response=presented, trace=trace)
+
+        # Structured (or empty) → verify/repair; Needle may correct degenerate only.
+        upstream, repaired = await self._verify_and_repair(request, upstream, session)
+        upstream = align_create_file_tool_calls(upstream, original_user_text(request))
+        try:
+            presented = self._present(upstream)
+            presented, buffered_ids = self._buffer_side_effects(
+                presented, session, session.trace_id
+            )
+            session.event("present", "ok", via=via, repaired=repaired)
+        except Exception as exc:  # noqa: BLE001
+            session.fail(FailureLocus.PRESENT, str(exc), stage="present")
+            session.finish(ok=False)
+            raise
+        summary = summarize_response(presented)
+        summary["repetition_repaired"] = repaired
+        summary["needle_tool_path"] = False
+        summary["maple_tools_primary"] = True
+        summary["needle_via"] = via
         summary["buffered_approvals"] = buffered_ids
         trace = session.finish(ok=True, response_summary=summary)
         return ComposeResult(response=presented, trace=trace)
@@ -271,19 +399,14 @@ class Compositor:
             )
             return None
 
-        instruction = assistant_text(maple_out)
+        maple_content, maple_reasoning = maple_message_channels(maple_out)
+        instruction = maple_content
         maple_nl_source = "content"
         # Prefer content; if Maple stuffed the plan into reasoning only, use that.
         if not instruction:
-            choices = maple_out.get("choices") or []
-            if choices and isinstance(choices[0], dict):
-                msg = choices[0].get("message") or {}
-                reasoning = msg.get("reasoning_content")
-                if isinstance(reasoning, str) and reasoning.strip():
-                    instruction = reasoning.strip()
-                    maple_nl_source = "reasoning_content"
-                else:
-                    maple_nl_source = "empty"
+            if maple_reasoning:
+                instruction = maple_reasoning
+                maple_nl_source = "reasoning_content"
             else:
                 maple_nl_source = "empty"
         user_task = original_user_text(request)
@@ -293,6 +416,8 @@ class Compositor:
             phase="maple_nl_done",
             maple_nl=instruction,
             maple_nl_source=maple_nl_source,
+            maple_content=maple_content,
+            maple_reasoning=maple_reasoning,
             instruction_len=len(instruction),
             policy_id=self.tool_path.policy_id,
         )
@@ -337,6 +462,7 @@ class Compositor:
                     return chunked
 
         result = await asyncio.to_thread(self.tool_path.handle_instruction, needle_input, request)
+        self._emit_needle_complete(session, attempt="primary")
         ok, miss_reason = self._nl_needle_acceptable(result, request, user_task)
         if not ok:
             if result is not None:
@@ -350,6 +476,28 @@ class Compositor:
                 )
             result = None
         if result is None:
+            # Intentional no-tool NL (marker) → stop with Maple prose; do not
+            # retry Needle or pay for fallback Maple-with-tools.
+            stop_content = no_tool_call_assistant_content(instruction, user_task=user_task)
+            if stop_content is not None:
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="final_answer_stop",
+                    via="maple_nl_no_tool",
+                    content_len=len(stop_content),
+                    maple_nl=instruction,
+                    reason=miss_reason or getattr(self.tool_path, "last_skip_reason", None),
+                    policy_id=self.tool_path.policy_id,
+                )
+                return ToolPathResult(
+                    response=no_tool_call_stop_response(stop_content, model=self.public_model_id),
+                    used_needle=False,
+                    confidence=None,
+                    empty_call=False,
+                    reasoning="maple_nl_no_tool_call",
+                    via="maple_nl_no_tool",
+                )
             # Second chance: allowlisted imperative retry (soft user-task briefs
             # often made Needle invent phone-call / missing-write refusals).
             tool_names = [
@@ -377,6 +525,7 @@ class Compositor:
                     retry,
                     request,
                 )
+                self._emit_needle_complete(session, attempt="retry")
                 ok2, miss2 = self._nl_needle_acceptable(result, request, user_task)
                 if not ok2:
                     session.event(
@@ -387,6 +536,29 @@ class Compositor:
                         policy_id=self.tool_path.policy_id,
                     )
                     result = None
+                    # Retry may still land on no-tool NL (same instruction).
+                    stop_content = no_tool_call_assistant_content(instruction, user_task=user_task)
+                    if stop_content is not None:
+                        session.event(
+                            "tool_select",
+                            "ok",
+                            phase="final_answer_stop",
+                            via="maple_nl_no_tool",
+                            content_len=len(stop_content),
+                            maple_nl=instruction,
+                            reason=miss2,
+                            policy_id=self.tool_path.policy_id,
+                        )
+                        return ToolPathResult(
+                            response=no_tool_call_stop_response(
+                                stop_content, model=self.public_model_id
+                            ),
+                            used_needle=False,
+                            confidence=None,
+                            empty_call=False,
+                            reasoning="maple_nl_no_tool_call",
+                            via="maple_nl_no_tool",
+                        )
         if result is None:
             synthetic = synthetic_mutation_response(user_task)
             if synthetic is not None:
@@ -426,9 +598,25 @@ class Compositor:
             via=result.via,
             empty_call=result.empty_call,
             confidence=result.confidence,
+            presented_tool_calls=_presented_tool_calls(result.response),
             policy_id=self.tool_path.policy_id,
         )
         return result
+
+    def _emit_needle_complete(self, session: TraceSession, *, attempt: str) -> None:
+        if self.tool_path is None:
+            return
+        detail = self.tool_path.pop_last_complete()
+        if not detail:
+            return
+        session.event(
+            "tool_select",
+            "ok",
+            phase="needle_complete",
+            attempt=attempt,
+            policy_id=self.tool_path.policy_id,
+            **detail,
+        )
 
     async def _maybe_tool_path(self, request: dict[str, Any], session: TraceSession):
         if self.tool_path is None:
@@ -705,3 +893,25 @@ class Compositor:
         if "choices" not in presented:
             presented["choices"] = []
         return presented
+
+
+def _presented_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Compact tool_calls from a chat.completion for traces."""
+    choices = response.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return []
+    message = choices[0].get("message") or {}
+    calls = message.get("tool_calls") or []
+    out: list[dict[str, Any]] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+        args = fn.get("arguments")
+        out.append(
+            {
+                "name": fn.get("name"),
+                "arguments": args,
+            }
+        )
+    return out

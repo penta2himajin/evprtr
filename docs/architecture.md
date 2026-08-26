@@ -45,7 +45,9 @@ Every `/v1/chat/completions` attempt gets a trace id (`X-Evprtr-Trace-Id`).
 | `locus` | Which stage failed: `accept`, `upstream`, `present` (later: plan / tool_select / execute / verify / repair), or `none` |
 | events | Ordered stage markers (`ok` / `error`) with timestamps |
 | request/response summaries | Counts, roles, finish reasons — **not** full harness message bodies |
-| maple_nl / needle_instruction | Full Maple NL and Needle input strings on `tool_select` events (measurement fidelity) |
+| maple_nl / needle_instruction | Full Maple NL and Needle input on `tool_select` events |
+| maple_content / maple_reasoning | Both Maple channels on `maple_nl_done` (measurement fidelity) |
+| needle_complete | Full Needle I/O: `needle_query`, `needle_function_calls`, `needle_reasoning`, `needle_confidence` |
 | persistence | JSON under `EVPRTR_TRACE_DIR` (default `.evprtr/traces/`) |
 | HTTP | `GET /v1/traces`, `GET /v1/traces/{id}` |
 
@@ -71,14 +73,15 @@ When the request includes `tools` and `tool_choice` is not `none`, the composito
 
 Default bridge (peelable via env):
 
-1. **Maple NL → Needle** (`EVPRTR_NEEDLE_VIA_MAPLE_NL=1`): Maple answers with natural-language tool instructions (`tool_choice=none`); Needle structures them into OpenAI `tool_calls`.
-2. **Chunked writes** (`EVPRTR_NEEDLE_CHUNK_WRITES=1`): if Maple NL includes a fenced file body, the compositor splits it and emits write+edit sentinel steps (Needle probed; deterministic plan as fallback).
-3. **Degenerate correction** (`EVPRTR_NEEDLE_CORRECT_DEGENERATE=1`): if Maple/Needle emits unusable write/edit args, Needle gets a correction instruction before Maple prose repair.
+1. **Maple NL → Needle** (`EVPRTR_NEEDLE_VIA_MAPLE_NL=1`, default): Maple answers with natural-language tool instructions (`tool_choice=none`); Needle structures them into OpenAI `tool_calls`.
+2. **Maple-tools primary (experiment)** (`EVPRTR_MAPLE_TOOLS_PRIMARY=1`): skip NL→Needle; Maple keeps `tools`. Valid `tool_calls` go through verify (Needle corrects degenerate only). Pseudo `<tool_call>` markup is promoted deterministically. Prose without tools is returned as `stop` (Needle is not asked to structure essays).
+3. **Chunked writes** (`EVPRTR_NEEDLE_CHUNK_WRITES=1`): if Maple NL includes a fenced file body, the compositor splits it and emits write+edit sentinel steps (Needle probed; deterministic plan as fallback).
+4. **Degenerate correction** (`EVPRTR_NEEDLE_CORRECT_DEGENERATE=1`): if Maple/Needle emits unusable write/edit args, Needle gets a correction instruction before Maple prose repair.
 
 | Outcome | Behaviour |
 |---|---|
 | `function_calls` non-empty | OpenAI-shaped `tool_calls` response (`finish_reason=tool_calls`) |
-| Empty call `[]` under auto | Fall back (do not kill the agent loop with a refusal) |
+| Empty call `[]` under auto | Fall back to Maple-with-tools, **unless** Maple NL starts with `No tool call needed.` → stop with that prose (`maple_nl_no_tool`) |
 | `tool_choice=none` | Needle skipped for that Maple NL pass only |
 | Needle unavailable | Fall back to Maple-with-tools |
 

@@ -54,6 +54,7 @@ def test_maple_nl_request_strips_tools():
     assert "tools" not in req
     assert req["tool_choice"] == "none"
     assert req["messages"][0]["role"] == "system"
+    assert "No tool call needed." in req["messages"][0]["content"]
     assert req["max_tokens"] == 384
 
 
@@ -64,6 +65,41 @@ def test_prepare_needle_instruction_falls_back_on_degenerate():
     out = prepare_needle_instruction(bad, user_task="Create file x.txt with content hi")
     assert "Create file x.txt" in out
     assert len(out) < len(bad)
+
+
+def test_is_no_tool_call_nl_requires_explicit_marker():
+    from compositor.tools.maple_nl import is_no_tool_call_nl, strip_no_tool_call_marker
+
+    assert is_no_tool_call_nl(
+        "No tool call needed.\n\nThis repo is a bench harness for Qwen on M1 Max."
+    )
+    assert is_no_tool_call_nl(
+        "No tool call needed. Chibi measures speculative decoding on Apple Silicon."
+    )
+    assert not is_no_tool_call_nl('Call ls. path="."')
+    assert not is_no_tool_call_nl(
+        "This repository is a measurement harness for Qwen3.5-4B on M1 Max."
+    )
+    assert not is_no_tool_call_nl('No tool call needed.\n<tool_call>\n{"name":"ls"}\n</tool_call>')
+    assert not is_no_tool_call_nl("No tool call needed.")
+    body = strip_no_tool_call_marker(
+        "No tool call needed.\n\nThis repo is a bench harness for Qwen on M1 Max."
+    )
+    assert body.startswith("This repo is a bench")
+    assert "No tool call needed" not in body
+
+
+def test_no_tool_call_assistant_content_blocks_mutation_tasks():
+    from compositor.tools.maple_nl import no_tool_call_assistant_content
+
+    nl = "No tool call needed.\n\nI would create the file but here is a summary instead."
+    assert (
+        no_tool_call_assistant_content(nl, user_task="Create file x.txt with content: hi") is None
+    )
+    assert no_tool_call_assistant_content(
+        nl,
+        user_task="Explore this repository and explain what it does.",
+    ).startswith("I would create")
 
 
 def test_needle_retry_instruction_is_short_imperative_like_official_examples():
@@ -110,6 +146,138 @@ def test_needle_retry_instruction_keeps_create_file_shape():
     assert out.startswith("Call write.")
     assert "live.txt" in out
     assert "ok" in out
+
+
+@pytest.mark.asyncio
+async def test_maple_nl_done_keeps_both_content_and_reasoning(tmp_path):
+    """Measurement: do not drop the unused Maple channel."""
+
+    class Maple:
+        async def chat_completions(self, payload):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": 'Call ls. path="."',
+                            "reasoning_content": "I should list the repo root first.",
+                        }
+                    }
+                ]
+            }
+
+    class RT(NeedleToolRuntime):
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            return NeedleCompleteResult(
+                function_calls=[
+                    {
+                        "name": "ls",
+                        "arguments": {"path": "."},
+                    }
+                ],
+                confidence=0.9,
+                reasoning="listing root",
+                raw={"function_calls": [{"name": "ls"}], "reasoning": "listing root"},
+            )
+
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        tool_path=NeedleToolPath(RT(), prefer_chunk_writes=False),
+        needle_via_maple_nl=True,
+        needle_chunk_writes=False,
+        buffer_side_effects=False,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [{"role": "user", "content": "list files"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ls",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    nl_done = next(e for e in result.trace.events if e.detail.get("phase") == "maple_nl_done")
+    assert nl_done.detail["maple_content"] == 'Call ls. path="."'
+    assert nl_done.detail["maple_reasoning"] == "I should list the repo root first."
+    assert nl_done.detail["maple_nl"] == 'Call ls. path="."'
+    needle = next(e for e in result.trace.events if e.detail.get("phase") == "needle_complete")
+    assert needle.detail["needle_query"].startswith("Call ls")
+    assert needle.detail["needle_function_calls"][0]["name"] == "ls"
+    assert needle.detail["needle_reasoning"] == "listing root"
+    assert needle.detail["needle_confidence"] == 0.9
+    assert needle.detail["attempt"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_needle_empty_still_logs_complete_trace(tmp_path):
+    class Maple:
+        async def chat_completions(self, payload):
+            if payload.get("tool_choice") == "none":
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": (
+                                    "No tool call needed.\n\n"
+                                    "Chibi is a bench harness on M1 Max for Qwen throughput."
+                                ),
+                            }
+                        }
+                    ]
+                }
+            raise AssertionError("no fallback")
+
+    class RT(NeedleToolRuntime):
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            return NeedleCompleteResult(
+                function_calls=[],
+                confidence=0.02,
+                reasoning="No tool for writing or editing tasks.",
+                raw={"function_calls": [], "reasoning": "No tool for writing"},
+            )
+
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        tool_path=NeedleToolPath(RT(), prefer_chunk_writes=False),
+        needle_via_maple_nl=True,
+        needle_chunk_writes=False,
+        buffer_side_effects=False,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [{"role": "user", "content": "Explain the repo."}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ls",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        }
+    )
+    needle = next(e for e in result.trace.events if e.detail.get("phase") == "needle_complete")
+    assert needle.detail["needle_function_calls"] == []
+    assert "writing" in (needle.detail.get("needle_reasoning") or "")
+    assert any(e.detail.get("phase") == "final_answer_stop" for e in result.trace.events)
 
 
 @pytest.mark.asyncio
@@ -412,6 +580,92 @@ async def test_nl_retries_on_degenerate_write(tmp_path):
     ]
     assert "needle_quality_miss" in phases
     assert "needle_retry_user_task" in phases
+
+
+@pytest.mark.asyncio
+async def test_no_tool_call_nl_short_circuits_to_stop_without_fallback(tmp_path):
+    """Explicit no-tool NL + Needle empty → stop content; no retry/FB."""
+
+    class Maple:
+        async def chat_completions(self, payload):
+            if payload.get("tool_choice") == "none":
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": (
+                                    "No tool call needed.\n\n"
+                                    "Chibi is a measurement harness for Qwen3.5-4B "
+                                    "on Apple Silicon (M1 Max), targeting 150 tok/s."
+                                ),
+                            }
+                        }
+                    ]
+                }
+            raise AssertionError("fallback Maple must not run")
+
+    class RT(NeedleToolRuntime):
+        def __init__(self):
+            self.n = 0
+
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            self.n += 1
+            return NeedleCompleteResult(
+                function_calls=[],
+                confidence=0.01,
+                reasoning="No tool for writing or editing tasks.",
+                raw={},
+            )
+
+    rt = RT()
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        tool_path=NeedleToolPath(rt, prefer_chunk_writes=False),
+        needle_via_maple_nl=True,
+        needle_chunk_writes=False,
+        buffer_side_effects=False,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Explore this repo and explain what it does.",
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ls",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    assert rt.n == 1
+    choice = result.response["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "Chibi is a measurement harness" in (choice["message"].get("content") or "")
+    assert not choice["message"].get("tool_calls")
+    phases = [
+        e.detail.get("phase")
+        for e in result.trace.events
+        if e.stage == "tool_select" and isinstance(e.detail, dict)
+    ]
+    assert "final_answer_stop" in phases
+    assert "needle_retry_user_task" not in phases
+    assert "fallback_maple" not in phases
+    assert result.trace.response_summary.get("needle_via") == "maple_nl_no_tool"
 
 
 @pytest.mark.asyncio

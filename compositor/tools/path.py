@@ -52,6 +52,27 @@ class NeedleToolPath:
         self.chunk_chars = max(200, chunk_chars)
         self.prefer_chunk_writes = prefer_chunk_writes
         self.last_skip_reason: str | None = None
+        # Last Needle.complete I/O for traces (measurement fidelity).
+        self.last_complete: dict[str, Any] | None = None
+
+    def pop_last_complete(self) -> dict[str, Any]:
+        detail = dict(self.last_complete or {})
+        self.last_complete = None
+        return detail
+
+    def _record_complete(self, query: str, result: NeedleCompleteResult) -> None:
+        raw = result.raw if isinstance(result.raw, dict) else {}
+        # Keep raw small: drop weighty keys if present; retain calls/reasoning.
+        compact_raw = {
+            k: raw[k] for k in ("function_calls", "reasoning", "confidence", "text") if k in raw
+        }
+        self.last_complete = {
+            "needle_query": query,
+            "needle_function_calls": list(result.function_calls or []),
+            "needle_confidence": result.confidence,
+            "needle_reasoning": result.reasoning,
+            "needle_raw": compact_raw,
+        }
 
     def enabled_for(self, request: dict[str, Any]) -> bool:
         return should_route_tools_to_needle(request, enabled=self.runtime.available())
@@ -87,6 +108,7 @@ class NeedleToolPath:
             return None
 
         result = self.runtime.complete(text, needle_tools)
+        self._record_complete(text, result)
         return self._result_from_complete(result, request, needle_tools, via=via)
 
     def apply_chunked_file(
@@ -105,9 +127,7 @@ class NeedleToolPath:
 
         chunks = split_content(content, max_chars=self.chunk_chars)
         needle_tools = [
-            t
-            for t in self._needle_tools(request)
-            if t.get("name") in {"write", "edit"}
+            t for t in self._needle_tools(request) if t.get("name") in {"write", "edit"}
         ]
         if not needle_tools:
             self.last_skip_reason = "no_write_edit_tools"
@@ -117,6 +137,7 @@ class NeedleToolPath:
             # Single shot: ask Needle to write the whole file; fall back to plan.
             query = needle_chunk_query(path, content, index=0, total=1)
             result = self.runtime.complete(query, needle_tools)
+            self._record_complete(query, result)
             shaped = self._result_from_complete(
                 result, request, needle_tools, via=via, allow_empty_fallback=False
             )
@@ -139,10 +160,12 @@ class NeedleToolPath:
         # Prefer deterministic multi-call plan for reliability; optionally probe
         # Needle on chunk 0 to confirm it understands write.
         planned = planned_tool_calls(path, chunks)
+        probe_q = needle_chunk_query(path, chunks[0], index=0, total=len(chunks))
         probe = self.runtime.complete(
-            needle_chunk_query(path, chunks[0], index=0, total=len(chunks)),
+            probe_q,
             [t for t in needle_tools if t.get("name") == "write"] or needle_tools,
         )
+        self._record_complete(probe_q, probe)
         used_needle = bool(probe.function_calls)
         message = {
             "role": "assistant",
@@ -202,13 +225,10 @@ class NeedleToolPath:
                 via=via,
             )
 
-        if allow_empty_fallback and choice not in {"required"} and not isinstance(
-            choice, dict
-        ):
+        if allow_empty_fallback and choice not in {"required"} and not isinstance(choice, dict):
             reason = (result.reasoning or "").strip().replace("\n", " ")
             self.last_skip_reason = (
-                f"empty_call_fallback conf={result.confidence} "
-                f"reasoning={reason[:160]!r}"
+                f"empty_call_fallback conf={result.confidence} reasoning={reason[:160]!r}"
             )
             return None
 
