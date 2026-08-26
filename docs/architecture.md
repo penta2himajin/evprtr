@@ -73,15 +73,15 @@ When the request includes `tools` and `tool_choice` is not `none`, the composito
 
 Default bridge (peelable via env):
 
-1. **Maple NL → Needle** (`EVPRTR_NEEDLE_VIA_MAPLE_NL=1`, default): Maple answers with natural-language tool instructions (`tool_choice=none`); Needle structures them into OpenAI `tool_calls`.
-2. **Maple-tools primary (experiment)** (`EVPRTR_MAPLE_TOOLS_PRIMARY=1`): skip NL→Needle; Maple keeps `tools`. Valid `tool_calls` go through verify (Needle corrects degenerate only). Pseudo `<tool_call>` markup is promoted deterministically. Prose without tools is returned as `stop` (Needle is not asked to structure essays).
+1. **Maple-tools primary (default)** (`EVPRTR_MAPLE_TOOLS_PRIMARY=1`): When the request has `tools` and `tool_choice` is not `none`, Maple keeps `tools`. Valid `tool_calls` go through verify (Needle corrects degenerate args). Pseudo `<tool_call>` markup is promoted deterministically when possible. Prose without tools returns as `stop` (essays are not sent to Needle). Empty/thin Maple or unparseable markup falls back to **Needle structure** (`needle_structure_fallback`). Before present, `read` on a clear directory path (`.`, trailing slash, or absolute `is_dir`) is coerced to `ls`.
+2. **Maple NL → Needle (legacy)** (`EVPRTR_MAPLE_TOOLS_PRIMARY=0` and `EVPRTR_NEEDLE_VIA_MAPLE_NL=1`): Maple answers with natural-language tool instructions (`tool_choice=none`); Needle structures them into OpenAI `tool_calls`.
 3. **Chunked writes** (`EVPRTR_NEEDLE_CHUNK_WRITES=1`): if Maple NL includes a fenced file body, the compositor splits it and emits write+edit sentinel steps (Needle probed; deterministic plan as fallback).
 4. **Degenerate correction** (`EVPRTR_NEEDLE_CORRECT_DEGENERATE=1`): if Maple/Needle emits unusable write/edit args, Needle gets a correction instruction before Maple prose repair.
 
 | Outcome | Behaviour |
 |---|---|
 | `function_calls` non-empty | OpenAI-shaped `tool_calls` response (`finish_reason=tool_calls`) |
-| Empty call `[]` under auto | Fall back to Maple-with-tools, **unless** Maple NL starts with `No tool call needed.` → stop with that prose (`maple_nl_no_tool`) |
+| Empty call `[]` under auto | On legacy NL path: fall back to Maple-with-tools, **unless** Maple NL starts with `No tool call needed.` → stop. On maple-tools-primary: Needle structure fallback may retry once |
 | `tool_choice=none` | Needle skipped for that Maple NL pass only |
 | Needle unavailable | Fall back to Maple-with-tools |
 

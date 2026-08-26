@@ -188,6 +188,7 @@ async def test_maple_nl_done_keeps_both_content_and_reasoning(tmp_path):
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(RT(), prefer_chunk_writes=False),
         needle_via_maple_nl=True,
+        maple_tools_primary=False,
         needle_chunk_writes=False,
         buffer_side_effects=False,
     )
@@ -257,6 +258,7 @@ async def test_needle_empty_still_logs_complete_trace(tmp_path):
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(RT(), prefer_chunk_writes=False),
         needle_via_maple_nl=True,
+        maple_tools_primary=False,
         needle_chunk_writes=False,
         buffer_side_effects=False,
     )
@@ -316,6 +318,7 @@ async def test_maple_nl_then_needle(tmp_path):
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(RT(), prefer_chunk_writes=True, chunk_chars=20),
         needle_via_maple_nl=True,
+        maple_tools_primary=False,
         needle_chunk_writes=True,
         buffer_side_effects=False,
     )
@@ -427,6 +430,7 @@ async def test_needle_corrects_degenerate_write(tmp_path):
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(RT()),
         needle_via_maple_nl=True,
+        maple_tools_primary=False,
         needle_correct_degenerate=True,
         needle_chunk_writes=False,
         buffer_side_effects=False,
@@ -525,6 +529,7 @@ async def test_nl_retries_on_degenerate_write(tmp_path):
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(rt),
         needle_via_maple_nl=True,
+        maple_tools_primary=False,
         needle_chunk_writes=False,
         needle_correct_degenerate=True,
         buffer_side_effects=False,
@@ -627,6 +632,7 @@ async def test_no_tool_call_nl_short_circuits_to_stop_without_fallback(tmp_path)
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(rt, prefer_chunk_writes=False),
         needle_via_maple_nl=True,
+        maple_tools_primary=False,
         needle_chunk_writes=False,
         buffer_side_effects=False,
     )
@@ -715,6 +721,7 @@ async def test_nl_empty_call_retry_uses_allowlisted_brief(tmp_path):
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(rt),
         needle_via_maple_nl=True,
+        maple_tools_primary=False,
         needle_chunk_writes=False,
         buffer_side_effects=False,
     )
@@ -827,6 +834,7 @@ async def test_missing_mutation_read_then_correct_write(tmp_path):
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(rt),
         needle_via_maple_nl=True,
+        maple_tools_primary=False,
         needle_chunk_writes=False,
         needle_correct_degenerate=True,
         buffer_side_effects=False,

@@ -5,7 +5,7 @@ import json
 import pytest
 
 from compositor.core import Compositor
-from compositor.runtimes.needle import NeedleToolRuntime
+from compositor.runtimes.needle import NeedleCompleteResult, NeedleToolRuntime
 from compositor.tools.path import NeedleToolPath
 from compositor.tools.pseudo_tool import (
     apply_pseudo_tool_calls_to_response,
@@ -30,10 +30,7 @@ def test_parse_pseudo_tool_calls_rejects_shell_compound_name():
 
 
 def test_apply_pseudo_clears_markup_and_sets_finish_reason():
-    content = (
-        "Before\n"
-        '<tool_call>\n{"name":"read","path":"README.md"}\n</tool_call>\n'
-    )
+    content = 'Before\n<tool_call>\n{"name":"read","path":"README.md"}\n</tool_call>\n'
     upstream = {
         "choices": [
             {
@@ -51,6 +48,72 @@ def test_apply_pseudo_clears_markup_and_sets_finish_reason():
     assert out["choices"][0]["finish_reason"] == "tool_calls"
     assert msg["tool_calls"][0]["function"]["name"] == "read"
     assert "<tool_call" not in (msg.get("content") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_maple_tools_primary_needle_structures_when_maple_empty(tmp_path):
+    """Empty Maple-with-tools → Needle structures from the user task."""
+
+    class Maple:
+        async def chat_completions(self, payload):
+            assert "tools" in payload
+            return {
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+    class RT(NeedleToolRuntime):
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            self.queries.append(query)
+            return NeedleCompleteResult(
+                function_calls=[{"name": "ls", "arguments": {"path": "."}}],
+                confidence=0.8,
+                reasoning="list root",
+                raw={},
+            )
+
+    rt = RT()
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        tool_path=NeedleToolPath(rt),
+        maple_tools_primary=True,
+        buffer_side_effects=False,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [{"role": "user", "content": "List files in the repo root."}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ls",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    assert rt.queries
+    msg = result.response["choices"][0]["message"]
+    assert msg.get("tool_calls")
+    assert msg["tool_calls"][0]["function"]["name"] == "ls"
+    phases = [e.detail.get("phase") for e in result.trace.events if isinstance(e.detail, dict)]
+    assert "needle_structure_fallback" in phases
+    assert result.trace.response_summary.get("needle_via") == "needle_structure_fallback"
 
 
 @pytest.mark.asyncio

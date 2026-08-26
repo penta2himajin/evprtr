@@ -18,6 +18,7 @@ from typing import Any
 from compositor.approvals.buffer import SideEffectBuffer
 from compositor.approvals.store import ApprovalStore
 from compositor.runtimes import ChatRuntime, UpstreamError
+from compositor.tools.coerce_read_ls import coerce_read_directory_to_ls
 from compositor.tools.convert import openai_tools_to_needle
 from compositor.tools.maple_nl import (
     align_create_file_tool_calls,
@@ -113,10 +114,10 @@ class Compositor:
             if needle_chunk_writes is None
             else needle_chunk_writes
         )
-        # Experiment: Maple-with-tools first; Needle only repairs broken calls.
-        # Prose stop skips Needle entirely (avoids NL→tool misfires).
+        # Default: Maple-with-tools first; Needle only structures/repairs misses.
+        # Set EVPRTR_MAPLE_TOOLS_PRIMARY=0 to restore Maple-NL→Needle as primary.
         self.maple_tools_primary = (
-            _env_flag("EVPRTR_MAPLE_TOOLS_PRIMARY", "0")
+            _env_flag("EVPRTR_MAPLE_TOOLS_PRIMARY", "1")
             if maple_tools_primary is None
             else maple_tools_primary
         )
@@ -128,7 +129,12 @@ class Compositor:
         )
         session.event("accept", "ok")
 
-        if self.maple_tools_primary and request.get("tools"):
+        # Skip when harness forbids tools (tool_choice=none): keep verify/repair.
+        if (
+            self.maple_tools_primary
+            and request.get("tools")
+            and request.get("tool_choice", "auto") != "none"
+        ):
             return await self._maple_tools_primary_path(request, session)
 
         # Preferred: Maple NL plan → Needle structures (and optional chunk apply).
@@ -159,7 +165,9 @@ class Compositor:
             raise
 
         upstream, repaired = await self._verify_and_repair(request, upstream, session)
-        upstream = align_create_file_tool_calls(upstream, original_user_text(request))
+        upstream = coerce_read_directory_to_ls(
+            align_create_file_tool_calls(upstream, original_user_text(request))
+        )
 
         try:
             presented = self._present(upstream)
@@ -182,17 +190,18 @@ class Compositor:
     async def _maple_tools_primary_path(
         self, request: dict[str, Any], session: TraceSession
     ) -> ComposeResult:
-        """Maple-with-tools first; Needle only repairs broken/structured misses.
+        """Maple-with-tools first; Needle structures/repairs only on misses.
 
-        - Valid ``tool_calls`` → verify (Needle correct on degenerate).
-        - Pseudo ``<tool_call>`` markup → deterministic promote.
+        - Valid ``tool_calls`` → verify (Needle corrects degenerate args).
+        - Pseudo ``<tool_call>`` markup → deterministic promote, else Needle.
         - Prose content without tools → stop (do not send essays to Needle).
+        - Empty / unusable Maple → Needle structure fallback from task/reasoning.
         """
         session.event(
             "tool_select",
             "ok",
             phase="maple_tools_primary",
-            policy_id="maple_tools_primary.v0",
+            policy_id="maple_tools_primary.v1",
         )
         try:
             session.event("upstream_call", "ok", phase="start", runtime="maple")
@@ -218,38 +227,54 @@ class Compositor:
             maple_reasoning=maple_reasoning,
             has_tool_calls=bool(structured),
             presented_tool_calls=_presented_tool_calls(upstream),
-            policy_id="maple_tools_primary.v0",
+            policy_id="maple_tools_primary.v1",
         )
 
         via = "maple_tools_primary"
-        if not structured and isinstance(msg.get("content"), str):
-            pseudo = parse_pseudo_tool_calls(msg["content"])
-            if pseudo:
-                upstream = apply_pseudo_tool_calls_to_response(upstream, pseudo)
-                via = "pseudo_tool_promoted"
-                session.event(
-                    "tool_select",
-                    "ok",
-                    phase="pseudo_tool_promoted",
-                    n_calls=len(pseudo),
-                    presented_tool_calls=_presented_tool_calls(upstream),
-                    policy_id="maple_tools_primary.v0",
-                )
-            elif len(maple_content.strip()) >= 40:
+        user_task = original_user_text(request)
+
+        if not structured:
+            content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+            if content and "<tool_call" in content.lower():
+                pseudo = parse_pseudo_tool_calls(content)
+                if pseudo:
+                    upstream = apply_pseudo_tool_calls_to_response(upstream, pseudo)
+                    via = "pseudo_tool_promoted"
+                    session.event(
+                        "tool_select",
+                        "ok",
+                        phase="pseudo_tool_promoted",
+                        n_calls=len(pseudo),
+                        presented_tool_calls=_presented_tool_calls(upstream),
+                        policy_id="maple_tools_primary.v1",
+                    )
+                    structured = pseudo
+                else:
+                    # Broken markup → ask Needle to normalize/structure.
+                    fb = await self._needle_structure_fallback(
+                        request,
+                        session,
+                        instruction=content.strip() or maple_reasoning,
+                        reason="unparseable_pseudo_tool_markup",
+                    )
+                    if fb is not None:
+                        return await self._finish_tool_result(fb, session, request)
+
+            if not structured and len(maple_content.strip()) >= 40:
                 # Intentional answer — do not Needle-structure prose.
                 session.event(
                     "tool_select",
                     "ok",
                     phase="maple_prose_stop",
                     content_len=len(maple_content),
-                    policy_id="maple_tools_primary.v0",
+                    policy_id="maple_tools_primary.v1",
                 )
                 try:
                     presented = self._present(upstream)
                     presented, buffered_ids = self._buffer_side_effects(
                         presented, session, session.trace_id
                     )
-                    session.event("present", "ok", via=via, prose_stop=True)
+                    session.event("present", "ok", via="maple_prose_stop", prose_stop=True)
                 except Exception as exc:  # noqa: BLE001
                     session.fail(FailureLocus.PRESENT, str(exc), stage="present")
                     session.finish(ok=False)
@@ -263,9 +288,23 @@ class Compositor:
                 trace = session.finish(ok=True, response_summary=summary)
                 return ComposeResult(response=presented, trace=trace)
 
-        # Structured (or empty) → verify/repair; Needle may correct degenerate only.
+            if not structured:
+                # Empty / thin Maple → Needle structures from task (or reasoning).
+                seed = maple_reasoning.strip() or maple_content.strip() or user_task
+                fb = await self._needle_structure_fallback(
+                    request,
+                    session,
+                    instruction=seed,
+                    reason="maple_empty_or_thin",
+                )
+                if fb is not None:
+                    return await self._finish_tool_result(fb, session, request)
+
+        # Structured (or last-resort empty) → verify; Needle may correct degenerate.
         upstream, repaired = await self._verify_and_repair(request, upstream, session)
-        upstream = align_create_file_tool_calls(upstream, original_user_text(request))
+        upstream = coerce_read_directory_to_ls(
+            align_create_file_tool_calls(upstream, original_user_text(request))
+        )
         try:
             presented = self._present(upstream)
             presented, buffered_ids = self._buffer_side_effects(
@@ -285,6 +324,91 @@ class Compositor:
         trace = session.finish(ok=True, response_summary=summary)
         return ComposeResult(response=presented, trace=trace)
 
+    async def _needle_structure_fallback(
+        self,
+        request: dict[str, Any],
+        session: TraceSession,
+        *,
+        instruction: str,
+        reason: str,
+    ) -> ToolPathResult | None:
+        """Ask Needle to structure a short instruction when Maple missed tools."""
+        if self.tool_path is None or not self.tool_path.enabled_for(request):
+            return None
+        user_task = original_user_text(request)
+        tool_names = [
+            str(t.get("name"))
+            for t in openai_tools_to_needle(request.get("tools"))
+            if t.get("name")
+        ]
+        raw = (instruction or "").strip()
+        # Prefer a short imperative; long essays become user-task briefs.
+        if len(raw) > 400 or _looks_like_final_prose(raw):
+            needle_input = needle_retry_instruction(
+                maple_nl=raw,
+                user_task=user_task,
+                tool_names=tool_names,
+            )
+            if not needle_input.strip():
+                needle_input = user_task_instruction(user_task)
+        else:
+            needle_input = prepare_needle_instruction(raw, user_task=user_task)
+
+        session.event(
+            "tool_select",
+            "ok",
+            phase="needle_structure_fallback",
+            reason=reason,
+            needle_instruction=needle_input,
+            needle_instruction_len=len(needle_input),
+            policy_id="maple_tools_primary.v1",
+        )
+        result = await asyncio.to_thread(
+            self.tool_path.handle_instruction,
+            needle_input,
+            request,
+            via="needle_structure_fallback",
+        )
+        self._emit_needle_complete(session, attempt="structure_fallback")
+        ok, miss = self._nl_needle_acceptable(result, request, user_task)
+        if ok and result is not None:
+            return self._finalize_nl_result(result, user_task)
+
+        # One allowlisted retry if the first structure pass abstained.
+        retry = needle_retry_instruction(
+            maple_nl=raw or user_task,
+            user_task=user_task,
+            tool_names=tool_names,
+        )
+        if retry.strip() and retry != needle_input:
+            session.event(
+                "tool_select",
+                "ok",
+                phase="needle_structure_retry",
+                needle_instruction=retry,
+                reason=miss or getattr(self.tool_path, "last_skip_reason", None),
+                policy_id="maple_tools_primary.v1",
+            )
+            result = await asyncio.to_thread(
+                self.tool_path.handle_instruction,
+                retry,
+                request,
+                via="needle_structure_fallback",
+            )
+            self._emit_needle_complete(session, attempt="structure_retry")
+            ok2, _miss2 = self._nl_needle_acceptable(result, request, user_task)
+            if ok2 and result is not None:
+                return self._finalize_nl_result(result, user_task)
+
+        session.event(
+            "tool_select",
+            "ok",
+            phase="needle_structure_miss",
+            reason=miss or getattr(self.tool_path, "last_skip_reason", None),
+            policy_id="maple_tools_primary.v1",
+        )
+        return None
+
     async def _finish_tool_result(
         self,
         tool_result: ToolPathResult,
@@ -299,7 +423,9 @@ class Compositor:
             current, _repaired = await self._verify_and_repair(
                 request, current, session, allow_needle_correct=True
             )
-            current = align_create_file_tool_calls(current, original_user_text(request))
+            current = coerce_read_directory_to_ls(
+                align_create_file_tool_calls(current, original_user_text(request))
+            )
             presented = self._present(current)
             presented, buffered_ids = self._buffer_side_effects(
                 presented, session, session.trace_id
@@ -316,6 +442,8 @@ class Compositor:
         summary["needle_confidence"] = tool_result.confidence
         summary["needle_via"] = via
         summary["buffered_approvals"] = buffered_ids
+        if self.maple_tools_primary:
+            summary["maple_tools_primary"] = True
         trace = session.finish(ok=True, response_summary=summary)
         return ComposeResult(response=presented, trace=trace)
 
@@ -342,7 +470,9 @@ class Compositor:
         return True, None
 
     def _finalize_nl_result(self, result: ToolPathResult, user_task: str) -> ToolPathResult:
-        aligned = align_create_file_tool_calls(result.response, user_task)
+        aligned = coerce_read_directory_to_ls(
+            align_create_file_tool_calls(result.response, user_task)
+        )
         if aligned is result.response:
             return result
         return ToolPathResult(
@@ -801,7 +931,9 @@ class Compositor:
                         self.tool_path.apply_chunked_file, fpath, content, request
                     )
                     if chunked is not None:
-                        aligned = align_create_file_tool_calls(chunked.response, task)
+                        aligned = coerce_read_directory_to_ls(
+                            align_create_file_tool_calls(chunked.response, task)
+                        )
                         ok, _ = self._nl_needle_acceptable(
                             ToolPathResult(
                                 response=aligned,
@@ -835,7 +967,9 @@ class Compositor:
             )
             if result is None or result.empty_call:
                 continue
-            aligned = align_create_file_tool_calls(result.response, task)
+            aligned = coerce_read_directory_to_ls(
+                align_create_file_tool_calls(result.response, task)
+            )
             shaped = ToolPathResult(
                 response=aligned,
                 used_needle=result.used_needle,
@@ -915,3 +1049,21 @@ def _presented_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _looks_like_final_prose(text: str) -> bool:
+    """Heuristic: essay/summary that should not be fed raw to Needle."""
+    low = (text or "").lower()
+    if len(low) < 120:
+        return False
+    hints = (
+        "summary",
+        "overview",
+        "this repository",
+        "this project",
+        "based on my",
+        "highlights",
+        "in conclusion",
+        "## ",
+    )
+    return any(h in low for h in hints)
