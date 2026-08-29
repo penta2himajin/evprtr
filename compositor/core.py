@@ -18,7 +18,10 @@ from typing import Any
 from compositor.approvals.buffer import SideEffectBuffer
 from compositor.approvals.store import ApprovalStore
 from compositor.runtimes import ChatRuntime, UpstreamError
-from compositor.tools.coerce_read_ls import coerce_read_directory_to_ls
+from compositor.tools.coerce_read_ls import (
+    coerce_ls_file_to_read,
+    coerce_read_directory_to_ls,
+)
 from compositor.tools.convert import openai_tools_to_needle
 from compositor.tools.maple_nl import (
     align_create_file_tool_calls,
@@ -165,8 +168,10 @@ class Compositor:
             raise
 
         upstream, repaired = await self._verify_and_repair(request, upstream, session)
-        upstream = coerce_read_directory_to_ls(
-            align_create_file_tool_calls(upstream, original_user_text(request))
+        upstream = coerce_ls_file_to_read(
+            coerce_read_directory_to_ls(
+                align_create_file_tool_calls(upstream, original_user_text(request))
+            )
         )
 
         try:
@@ -302,8 +307,10 @@ class Compositor:
 
         # Structured (or last-resort empty) → verify; Needle may correct degenerate.
         upstream, repaired = await self._verify_and_repair(request, upstream, session)
-        upstream = coerce_read_directory_to_ls(
-            align_create_file_tool_calls(upstream, original_user_text(request))
+        upstream = coerce_ls_file_to_read(
+            coerce_read_directory_to_ls(
+                align_create_file_tool_calls(upstream, original_user_text(request))
+            )
         )
         try:
             presented = self._present(upstream)
@@ -423,8 +430,10 @@ class Compositor:
             current, _repaired = await self._verify_and_repair(
                 request, current, session, allow_needle_correct=True
             )
-            current = coerce_read_directory_to_ls(
-                align_create_file_tool_calls(current, original_user_text(request))
+            current = coerce_ls_file_to_read(
+                coerce_read_directory_to_ls(
+                    align_create_file_tool_calls(current, original_user_text(request))
+                )
             )
             presented = self._present(current)
             presented, buffered_ids = self._buffer_side_effects(
@@ -470,8 +479,8 @@ class Compositor:
         return True, None
 
     def _finalize_nl_result(self, result: ToolPathResult, user_task: str) -> ToolPathResult:
-        aligned = coerce_read_directory_to_ls(
-            align_create_file_tool_calls(result.response, user_task)
+        aligned = coerce_ls_file_to_read(
+            coerce_read_directory_to_ls(align_create_file_tool_calls(result.response, user_task))
         )
         if aligned is result.response:
             return result
@@ -931,8 +940,10 @@ class Compositor:
                         self.tool_path.apply_chunked_file, fpath, content, request
                     )
                     if chunked is not None:
-                        aligned = coerce_read_directory_to_ls(
-                            align_create_file_tool_calls(chunked.response, task)
+                        aligned = coerce_ls_file_to_read(
+                            coerce_read_directory_to_ls(
+                                align_create_file_tool_calls(chunked.response, task)
+                            )
                         )
                         ok, _ = self._nl_needle_acceptable(
                             ToolPathResult(
@@ -967,8 +978,8 @@ class Compositor:
             )
             if result is None or result.empty_call:
                 continue
-            aligned = coerce_read_directory_to_ls(
-                align_create_file_tool_calls(result.response, task)
+            aligned = coerce_ls_file_to_read(
+                coerce_read_directory_to_ls(align_create_file_tool_calls(result.response, task))
             )
             shaped = ToolPathResult(
                 response=aligned,

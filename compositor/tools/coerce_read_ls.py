@@ -1,8 +1,10 @@
-"""Narrow coerce: ``read`` on a directory target → ``ls``.
+"""Narrow coerce: ``read``↔``ls`` when the path target is obviously wrong.
 
-Maple sometimes emits ``read`` with ``path`` set to a repo root or folder.
-That wastes a turn; ``ls`` is the correct tool. Rules stay narrow to avoid
-touching extensionless files (``Makefile``, ``LICENSE``, …).
+- ``read`` on a directory → ``ls``
+- ``ls`` on a file → ``read``
+
+Rules stay narrow to avoid touching ambiguous extensionless paths
+(``Makefile``, ``LICENSE``, …) unless an absolute ``is_file()`` check confirms.
 """
 
 from __future__ import annotations
@@ -11,6 +13,19 @@ import copy
 import json
 from pathlib import Path
 from typing import Any
+
+_CODEISH_SUFFIXES = (
+    ".toml",
+    ".rs",
+    ".py",
+    ".ts",
+    ".js",
+    ".json",
+    ".md",
+    ".txt",
+    ".yml",
+    ".yaml",
+)
 
 
 def _fn_args(call: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -49,8 +64,30 @@ def path_looks_like_directory(path: str) -> bool:
     return False
 
 
-def coerce_read_directory_to_ls(response: dict[str, Any]) -> dict[str, Any]:
-    """Rewrite ``read`` tool_calls whose path is a directory into ``ls``."""
+def path_looks_like_file(path: str) -> bool:
+    """True for clear file targets (code-ish suffix or absolute is_file)."""
+    p = (path or "").strip()
+    if not p or path_looks_like_directory(p):
+        return False
+    lower = p.lower().replace("\\", "/")
+    if any(lower.endswith(suf) for suf in _CODEISH_SUFFIXES):
+        return True
+    try:
+        cand = Path(p)
+        if cand.is_absolute() and cand.is_file():
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def _rewrite_tool_name(
+    response: dict[str, Any],
+    *,
+    from_name: str,
+    to_name: str,
+    path_ok,
+) -> dict[str, Any]:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
         return response
@@ -71,16 +108,35 @@ def coerce_read_directory_to_ls(response: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(call, dict):
             continue
         name, args, fn = _fn_args(call)
-        if name != "read":
+        if name != from_name:
             continue
         path = str(args.get("path") or args.get("file") or "").strip()
-        if not path_looks_like_directory(path):
+        if not path_ok(path):
             continue
-        fn["name"] = "ls"
-        # Keep args as JSON string for OpenAI shape consistency.
+        fn["name"] = to_name
         fn["arguments"] = json.dumps(args, ensure_ascii=False)
         call["function"] = fn
         changed = True
     if not changed:
         return response
     return out
+
+
+def coerce_read_directory_to_ls(response: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite ``read`` tool_calls whose path is a directory into ``ls``."""
+    return _rewrite_tool_name(
+        response,
+        from_name="read",
+        to_name="ls",
+        path_ok=path_looks_like_directory,
+    )
+
+
+def coerce_ls_file_to_read(response: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite ``ls`` tool_calls whose path is a file into ``read``."""
+    return _rewrite_tool_name(
+        response,
+        from_name="ls",
+        to_name="read",
+        path_ok=path_looks_like_file,
+    )
