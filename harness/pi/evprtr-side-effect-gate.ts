@@ -5,7 +5,7 @@
  * requires confirmation before executing side-effect tools.
  *
  * Passthrough (no prompt): read, grep, find, ls
- * Gated: bash, powershell, write, edit
+ * Gated: bash, execute_bash, powershell, write, edit
  *
  * Interactive (TUI) or RPC (`ctx.hasUI`): confirm dialog; on Yes the built-in
  * tool runs. Drive RPC confirms with `harness/pi/rpc_bridge.py`.
@@ -31,7 +31,7 @@
 import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const GATED = new Set(["bash", "powershell", "write", "edit"]);
+const GATED = new Set(["bash", "execute_bash", "powershell", "write", "edit"]);
 
 const PASSTHROUGH = new Set(["read", "grep", "find", "ls"]);
 
@@ -54,7 +54,7 @@ function mutationFingerprint(toolName: string, input: Record<string, unknown>): 
 		const edits = input.edits ?? [];
 		return `edit:${path}:${sha32(JSON.stringify(edits))}`;
 	}
-	if (toolName === "bash" || toolName === "powershell") {
+	if (toolName === "bash" || toolName === "execute_bash" || toolName === "powershell") {
 		return `${toolName}:${sha32(String(input.command ?? ""))}`;
 	}
 	return `${toolName}:${sha32(JSON.stringify(input))}`;
@@ -62,7 +62,7 @@ function mutationFingerprint(toolName: string, input: Record<string, unknown>): 
 
 function previewInput(toolName: string, input: Record<string, unknown>): string {
 	try {
-		if (toolName === "bash" || toolName === "powershell") {
+		if (toolName === "bash" || toolName === "execute_bash" || toolName === "powershell") {
 			const cmd = String(input.command ?? "");
 			return cmd.length > 500 ? `${cmd.slice(0, 497)}...` : cmd;
 		}
