@@ -1,0 +1,78 @@
+# Task: implement coerce_ls_file_to_read (dogfood #1)
+
+## Goal
+Make `tests/test_coerce_read_ls.py` pass. New tests expect `coerce_ls_file_to_read`.
+
+## Allowed files (ONLY these)
+- compositor/tools/coerce_read_ls.py
+- compositor/core.py  (wire the new helper next to existing coerce_read_directory_to_ls calls)
+- docs/architecture.md  (one short sentence if you mention the symmetric coerce)
+
+Do NOT touch other files. Do NOT rewrite unrelated logic.
+
+## Direction (read this first — do not invert)
+
+| Function | Rename | When |
+|---|---|---|
+| **NEW** `coerce_ls_file_to_read` | **`ls` → `read`** | path clearly names a **file** |
+| EXISTING `coerce_read_directory_to_ls` | `read` → `ls` | path is a **directory** (already implemented — do not copy its rename direction) |
+
+**Critical:** In `coerce_ls_file_to_read`, the only tool-name change allowed is `ls` → `read`.
+**NEVER** rename `read` → `ls` inside the new function. That is the OTHER helper.
+
+## Spec for the NEW function only
+
+Add `path_looks_like_file(path: str) -> bool` and `coerce_ls_file_to_read(response) -> response`.
+
+Coerce when path is file-like:
+- has a code-ish suffix (`.md`, `.py`, `.ts`, `.js`, `.json`, `.txt`, `.toml`, `.yml`, `.yaml`, `.rs`, …) AND is not a directory (not `.`, not trailing `/`)
+- OR absolute path where `Path(path).is_file()` is True
+
+Do NOT coerce:
+- `ls` path `.` / `./`
+- trailing-slash directories
+- absolute directories (`is_dir`)
+- calls already named `read` or `write` (leave untouched)
+
+Reuse `_fn_args` already in the module. Keep OpenAI `arguments` as a JSON string after rename.
+You may reuse structure (deepcopy loop), but **not** the rename direction of `coerce_read_directory_to_ls`.
+
+## One worked example (match this exactly)
+
+Input tool_calls:
+```json
+[{"function": {"name": "ls", "arguments": "{\"path\": \"README.md\"}"}}]
+```
+Output tool_calls after `coerce_ls_file_to_read`:
+```json
+[{"function": {"name": "read", "arguments": "{\"path\": \"README.md\"}"}}]
+```
+
+Wrong (do not produce this):
+```json
+[{"function": {"name": "ls", "arguments": "{\"path\": \"README.md\"}"}}]  // unchanged when it should become read
+```
+Also wrong: renaming `read` → `ls` for a file path.
+
+## Wire-up in core.py
+
+Wherever you see:
+```python
+coerce_read_directory_to_ls(align_create_file_tool_calls(...))
+```
+change to:
+```python
+coerce_ls_file_to_read(coerce_read_directory_to_ls(align_create_file_tool_calls(...)))
+```
+Order: align → read-dir-to-ls → **ls-file-to-read**.
+
+## Self-check before finishing
+1. In `coerce_ls_file_to_read`, search for `name != "ls"` (or equivalent) and `fn["name"] = "read"`.
+2. Confirm there is **no** `fn["name"] = "ls"` inside `coerce_ls_file_to_read`.
+3. Run: `.venv/bin/pytest tests/test_coerce_read_ls.py -q`
+4. Run: `.venv/bin/ruff check compositor/tools/coerce_read_ls.py compositor/core.py`
+
+## Done when
+- pytest for `test_coerce_read_ls.py` is green
+- self-check above passes
+- brief English summary of what you changed
