@@ -177,7 +177,12 @@ def _offered_mutation_tools(request: dict[str, Any] | None) -> bool:
 
 
 class MissingMutationDetector:
-    """Task needs write/edit but the model stopped with only read/prose."""
+    """Task needs write/edit but the model stopped with prose and no tools.
+
+    Agentic exploration turns that emit ``read``/``ls``/``grep`` ``tool_calls``
+    must pass through so the harness can continue; only a tool-less stop on a
+    mutation task is treated as missing_mutation.
+    """
 
     policy_id = MISSING_MUTATION_ID
 
@@ -198,18 +203,21 @@ class MissingMutationDetector:
         if tool_calls_satisfy_mutation(wrapped):
             return None
         calls = message.get("tool_calls") or []
-        names = []
+        names: list[str] = []
         for call in calls:
             if isinstance(call, dict):
                 fn = call.get("function") if isinstance(call.get("function"), dict) else {}
                 names.append(str(fn.get("name") or ""))
+        # Any structured tool turn (including read-only) is left for the harness.
+        if any(n.strip() for n in names):
+            return None
         return Diagnosis(
             policy_id=self.policy_id,
             field="tool_calls",
             kind="missing_mutation",
             onset=0,
             detail={
-                "reason": "read_or_prose_without_write",
+                "reason": "prose_without_write",
                 "tool_names": names,
                 "task_head": task[:160],
             },

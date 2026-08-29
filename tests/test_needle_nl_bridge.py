@@ -768,11 +768,12 @@ async def test_nl_empty_call_retry_uses_allowlisted_brief(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_missing_mutation_read_then_correct_write(tmp_path):
-    """NL miss → Maple read-only settle → MissingMutation → Needle write.
+async def test_missing_mutation_prose_stop_then_correct_write(tmp_path):
+    """NL miss → Maple prose stop → MissingMutation → Needle write.
 
     Task intentionally avoids create-file regex so synthetic fallback does not
-    short-circuit before MissingMutation can fire.
+    short-circuit before MissingMutation can fire. Read-only tool turns are
+    allowed through (agentic); this covers tool-less premature stop only.
     """
 
     class Maple:
@@ -784,19 +785,10 @@ async def test_missing_mutation_read_then_correct_write(tmp_path):
                     {
                         "message": {
                             "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": "call_r",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "read",
-                                        "arguments": json.dumps({"path": "notes.txt"}),
-                                    },
-                                }
-                            ],
+                            "content": "I will write notes.txt later.",
+                            "tool_calls": None,
                         },
-                        "finish_reason": "tool_calls",
+                        "finish_reason": "stop",
                     }
                 ]
             }
@@ -810,7 +802,7 @@ async def test_missing_mutation_read_then_correct_write(tmp_path):
 
         def complete(self, query, tools, *, max_new_tokens=None):
             self.n += 1
-            # NL first + NL user-task retry abstain; 3rd call is Needle correct.
+            # NL first + NL user-task retry abstain; later call is Needle correct.
             if self.n >= 3 and "notes.txt" in query and "hello" in query.lower():
                 return NeedleCompleteResult(
                     function_calls=[
@@ -892,3 +884,69 @@ async def test_missing_mutation_read_then_correct_write(tmp_path):
         if e.stage == "verify" and isinstance(e.detail, dict)
     ]
     assert "missing_mutation" in kinds
+
+
+@pytest.mark.asyncio
+async def test_maple_tools_primary_passes_read_on_mutation_task(tmp_path):
+    """Dogfood lesson: read tool_calls must reach the harness on edit tasks."""
+
+    class Maple:
+        async def chat_completions(self, payload):
+            assert "tools" in payload
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_r",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read",
+                                        "arguments": json.dumps(
+                                            {"path": "compositor/tools/coerce_read_ls.py"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        maple_tools_primary=True,
+        buffer_side_effects=False,
+        repair_attempts=1,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Implement coerce_ls_file_to_read. Edit the file. "
+                        "Use write/edit tools when ready."
+                    ),
+                }
+            ],
+            "tools": [
+                {"type": "function", "function": {"name": "read"}},
+                {"type": "function", "function": {"name": "write"}},
+                {"type": "function", "function": {"name": "edit"}},
+            ],
+        }
+    )
+    msg = result.response["choices"][0]["message"]
+    assert msg["tool_calls"][0]["function"]["name"] == "read"
+    kinds = [
+        e.detail.get("kind")
+        for e in result.trace.events
+        if e.stage == "verify" and isinstance(e.detail, dict)
+    ]
+    assert "missing_mutation" not in kinds

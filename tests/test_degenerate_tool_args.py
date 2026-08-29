@@ -94,9 +94,7 @@ def test_empty_edit_texts_detected():
                     "type": "function",
                     "function": {
                         "name": "edit",
-                        "arguments": json.dumps(
-                            {"path": "notes.txt", "edits": [{}]}
-                        ),
+                        "arguments": json.dumps({"path": "notes.txt", "edits": [{}]}),
                     },
                 }
             ],
@@ -119,9 +117,7 @@ def test_align_create_file_rewrites_mangled_path():
                 "message": {
                     "role": "assistant",
                     "content": None,
-                    "tool_calls": [
-                        _write_call("file_live-nl-smoke5.txt", "nl-needle-ok")
-                    ],
+                    "tool_calls": [_write_call("file_live-nl-smoke5.txt", "nl-needle-ok")],
                 }
             }
         ]
@@ -208,7 +204,8 @@ def test_bundle_sanitizes_degenerate_tool_calls():
     assert msg.get("tool_calls") in (None, [])
 
 
-def test_missing_mutation_detector_flags_read_only():
+def test_missing_mutation_detector_allows_read_tool_turn():
+    """Agentic exploration: read tool_calls must not be stripped as missing_mutation."""
     from compositor.verify.detectors_tools import MissingMutationDetector
 
     d = MissingMutationDetector()
@@ -247,8 +244,42 @@ def test_missing_mutation_detector_flags_read_only():
         },
         request=request,
     )
+    assert hit is None
+
+
+def test_missing_mutation_detector_flags_prose_stop_without_tools():
+    from compositor.verify.detectors_tools import MissingMutationDetector
+
+    d = MissingMutationDetector()
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Create file notes.txt with content hello via write tool",
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "write", "parameters": {"type": "object"}},
+            },
+            {
+                "type": "function",
+                "function": {"name": "read", "parameters": {"type": "object"}},
+            },
+        ],
+    }
+    hit = d.diagnose(
+        {
+            "role": "assistant",
+            "content": "I'll write the file later.",
+            "tool_calls": None,
+        },
+        request=request,
+    )
     assert hit is not None
     assert hit.kind == "missing_mutation"
+    assert hit.detail.get("reason") == "prose_without_write"
 
 
 def test_bundle_sanitizes_missing_mutation():
@@ -276,17 +307,8 @@ def test_bundle_sanitizes_missing_mutation():
             {
                 "message": {
                     "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "c1",
-                            "type": "function",
-                            "function": {
-                                "name": "read",
-                                "arguments": '{"path": "notes.txt"}',
-                            },
-                        }
-                    ],
+                    "content": "",
+                    "tool_calls": None,
                 }
             }
         ]
