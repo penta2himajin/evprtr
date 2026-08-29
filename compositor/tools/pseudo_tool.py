@@ -60,6 +60,19 @@ def _parse_block_body(body: str) -> tuple[str, dict[str, Any] | str] | None:
         name = str(data.get("name") or data.get("tool") or "").strip()
         if not name:
             return None
+        # OpenAI-shaped: {"name": "...", "arguments": {...}|"{...}"}
+        if "arguments" in data:
+            raw_args = data.get("arguments")
+            if isinstance(raw_args, dict):
+                return name, raw_args
+            if isinstance(raw_args, str) and raw_args.strip():
+                try:
+                    parsed_args = json.loads(raw_args)
+                    if isinstance(parsed_args, dict):
+                        return name, parsed_args
+                except json.JSONDecodeError:
+                    return name, {"raw": raw_args}
+            return name, {}
         args = {k: v for k, v in data.items() if k not in {"name", "tool"}}
         return name, args
 

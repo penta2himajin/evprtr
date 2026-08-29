@@ -265,8 +265,14 @@ class Compositor:
                     if fb is not None:
                         return await self._finish_tool_result(fb, session, request)
 
-            if not structured and len(maple_content.strip()) >= 40:
+            if (
+                not structured
+                and len(maple_content.strip()) >= 40
+                and "<tool_call" not in maple_content.lower()
+            ):
                 # Intentional answer — do not Needle-structure prose.
+                # If content still has unparseable <tool_call> markup, fall
+                # through to verify/repair instead of stopping with the markup.
                 session.event(
                     "tool_select",
                     "ok",

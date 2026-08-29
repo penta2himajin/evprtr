@@ -21,11 +21,13 @@ python harness/pi/rpc_bridge.py run `
 # Prefer --prompt-file on Windows PowerShell (quoting breaks multiline --prompt).
 
 # B: supervisor / Cursor
+python harness/pi/show_pending.py --state-dir ...\pi-rpc
 python harness/pi/rpc_bridge.py pending --state-dir ...\pi-rpc
 python harness/pi/rpc_bridge.py decide --state-dir ...\pi-rpc --id <uuid> --approve
 python harness/pi/rpc_bridge.py wait --state-dir ...\pi-rpc
 ```
 
+Cursor / Auto supervisors: poll `show_pending.py`, read `message` / tool args, then `decide --approve` or `--reject`. Do not use `pi -p` for mutation dogfood — side-effect tools are blocked without UI/RPC.
 ### Rewrite / reject loop suppression
 
 | Layer | Behavior |

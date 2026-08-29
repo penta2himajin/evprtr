@@ -24,6 +24,22 @@ def test_parse_pseudo_tool_calls_json_block():
     assert args["limit"] == 50
 
 
+def test_parse_pseudo_openai_arguments_wrapper():
+    """Maple often emits OpenAI-shaped {\"name\", \"arguments\": {...}} inside markup."""
+    text = (
+        "<tool_call>\n"
+        '{"name": "edit", "arguments": {"path": "a.py", "edits": '
+        '[{"oldText": "x", "newText": "y"}]}}\n'
+        "</tool_call>"
+    )
+    calls = parse_pseudo_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "edit"
+    args = json.loads(calls[0]["function"]["arguments"])
+    assert args == {"path": "a.py", "edits": [{"oldText": "x", "newText": "y"}]}
+    assert "arguments" not in args
+
+
 def test_parse_pseudo_tool_calls_rejects_shell_compound_name():
     text = '<tool_call>\n{"name": "ls -la bench/", "limit": 500}\n</tool_call>'
     assert parse_pseudo_tool_calls(text) == []
