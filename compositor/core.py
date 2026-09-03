@@ -41,6 +41,10 @@ from compositor.tools.pseudo_tool import (
     apply_pseudo_tool_calls_to_response,
     parse_pseudo_tool_calls,
 )
+from compositor.tools.tools_grammar import (
+    attach_tools_structured_outputs,
+    promote_tool_json_content,
+)
 from compositor.trace import (
     FailureLocus,
     TraceRecord,
@@ -203,9 +207,24 @@ class Compositor:
             phase="maple_tools_primary",
             policy_id="maple_tools_primary.v1",
         )
+        maple_request = request
+        tools_grammar = False
+        # Needle-off: constrain Maple via oMLX structured_outputs derived from tools.
+        if self.tool_path is None and _env_flag("EVPRTR_TOOLS_GRAMMAR", "1"):
+            maple_request = attach_tools_structured_outputs(request)
+            tools_grammar = maple_request is not request and bool(
+                maple_request.get("structured_outputs")
+            )
+            if tools_grammar:
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="tools_grammar_attached",
+                    policy_id="tools_grammar.v1",
+                )
         try:
             session.event("upstream_call", "ok", phase="start", runtime="maple")
-            upstream = await self.runtime.chat_completions(request)
+            upstream = await self.runtime.chat_completions(maple_request)
             session.event("upstream_call", "ok", phase="done", runtime="maple")
         except UpstreamError as exc:
             session.fail(FailureLocus.UPSTREAM, str(exc), stage="upstream_call")
@@ -215,6 +234,18 @@ class Compositor:
             session.fail(FailureLocus.UPSTREAM, f"unexpected: {exc}", stage="upstream_call")
             session.finish(ok=False)
             raise
+
+        if tools_grammar:
+            promoted = promote_tool_json_content(upstream)
+            if promoted is not upstream:
+                upstream = promoted
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="tools_grammar_promoted",
+                    policy_id="tools_grammar.v1",
+                    presented_tool_calls=_presented_tool_calls(upstream),
+                )
 
         maple_content, maple_reasoning = maple_message_channels(upstream)
         msg = assistant_message(upstream) or {}
