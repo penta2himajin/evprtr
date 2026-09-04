@@ -365,20 +365,12 @@ async def test_maple_nl_then_needle(tmp_path):
 
 @pytest.mark.asyncio
 async def test_needle_corrects_degenerate_write(tmp_path):
+    """Maple-tools-primary emits bad write → Needle correct (Maple→Needle only)."""
+
     class Maple:
         async def chat_completions(self, payload):
-            # Agent-with-tools path after NL miss — emit degenerate write.
-            if payload.get("tool_choice") == "none":
-                return {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "please write the file",
-                            }
-                        }
-                    ]
-                }
+            # Markup primary strips OpenAI tools; Maple returns native tool_calls.
+            assert "tools" not in payload or payload.get("tool_choice") != "none"
             return {
                 "choices": [
                     {
@@ -430,8 +422,7 @@ async def test_needle_corrects_degenerate_write(tmp_path):
         Maple(),
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(RT()),
-        needle_via_maple_nl=True,
-        maple_tools_primary=False,
+        maple_tools_primary=True,
         needle_correct_degenerate=True,
         needle_chunk_writes=False,
         buffer_side_effects=False,
@@ -462,12 +453,86 @@ async def test_needle_corrects_degenerate_write(tmp_path):
             ],
         }
     )
-    # NL→Needle abstains → Maple tools emits Tower → correct to Cargo.toml
     args = result.response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
     if isinstance(args, str):
         args = json.loads(args)
     assert args["path"] == "Cargo.toml"
     assert "axum" in args["content"]
+
+
+@pytest.mark.asyncio
+async def test_needle_miss_does_not_fallback_to_maple(tmp_path):
+    """After Needle abstains, never open a second Maple-with-tools turn."""
+
+    maple_calls: list[dict] = []
+
+    class Maple:
+        async def chat_completions(self, payload):
+            maple_calls.append(dict(payload))
+            assert payload.get("tool_choice") == "none"
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Call ls on the repo root.",
+                        }
+                    }
+                ]
+            }
+
+    class RT(NeedleToolRuntime):
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            return NeedleCompleteResult(
+                function_calls=[],
+                confidence=0.0,
+                reasoning="phone call",
+                raw={},
+            )
+
+    c = Compositor(
+        Maple(),
+        traces=TraceStore(tmp_path),
+        tool_path=NeedleToolPath(RT(), prefer_chunk_writes=False),
+        needle_via_maple_nl=True,
+        maple_tools_primary=False,
+        needle_chunk_writes=False,
+        buffer_side_effects=False,
+    )
+    result = await c.chat_completions(
+        {
+            "messages": [{"role": "user", "content": 'List files with ls path="."'}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ls",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    assert len(maple_calls) == 1
+    assert maple_calls[0].get("tool_choice") == "none"
+    assert "tools" not in maple_calls[0]
+    choice = result.response["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert not choice["message"].get("tool_calls")
+    phases = [
+        e.detail.get("phase")
+        for e in result.trace.events
+        if e.stage == "tool_select" and isinstance(e.detail, dict)
+    ]
+    assert "needle_miss_stop" in phases
+    assert "fallback_maple" not in phases
+    assert result.trace.response_summary.get("needle_via") == "needle_miss_stop"
 
 
 @pytest.mark.asyncio
@@ -778,12 +843,11 @@ async def test_nl_empty_call_retry_uses_allowlisted_brief(tmp_path):
 
 @pytest.mark.asyncio
 async def test_nl_path_presents_read_without_missing_mutation_coerce(tmp_path):
-    """Without MissingMutation, a read-only Maple settle is presented as-is."""
+    """Maple-tools-primary: a read-only settle is presented (no Needle→Maple)."""
 
     class Maple:
         async def chat_completions(self, payload):
-            if payload.get("tool_choice") == "none":
-                return {"choices": [{"message": {"role": "assistant", "content": "hmm"}}]}
+            assert "tools" not in payload
             return {
                 "choices": [
                     {
@@ -811,14 +875,13 @@ async def test_nl_path_presents_read_without_missing_mutation_coerce(tmp_path):
             return True
 
         def complete(self, query, tools, *, max_new_tokens=None):
-            return NeedleCompleteResult([], 0.0, "abstain", {})
+            raise AssertionError("Needle must not run for valid Maple tool_calls")
 
     c = Compositor(
         Maple(),
         traces=TraceStore(tmp_path),
         tool_path=NeedleToolPath(RT()),
-        needle_via_maple_nl=True,
-        maple_tools_primary=False,
+        maple_tools_primary=True,
         needle_chunk_writes=False,
         needle_correct_degenerate=True,
         buffer_side_effects=False,
@@ -870,3 +933,4 @@ async def test_nl_path_presents_read_without_missing_mutation_coerce(tmp_path):
         if e.stage == "verify" and isinstance(e.detail, dict)
     ]
     assert "missing_mutation" not in kinds
+    assert result.trace.response_summary.get("maple_tools_primary") is True

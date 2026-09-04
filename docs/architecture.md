@@ -81,9 +81,9 @@ Default bridge (peelable via env):
 | Outcome | Behaviour |
 |---|---|
 | `function_calls` non-empty | OpenAI-shaped `tool_calls` response (`finish_reason=tool_calls`) |
-| Empty call `[]` under auto | On legacy NL path: fall back to Maple-with-tools, **unless** Maple NL starts with `No tool call needed.` → stop. On maple-tools-primary: Needle structure fallback may retry once |
+| Empty call `[]` under auto | On legacy NL path: **stop** with Maple NL / miss note (`needle_miss_stop`) — never a second Maple-with-tools turn. On maple-tools-primary: Needle structure fallback may retry once, then present Maple outcome |
 | `tool_choice=none` | Needle skipped for that Maple NL pass only |
-| Needle unavailable | Fall back to Maple-with-tools |
+| Needle unavailable | Maple-with-tools (Needle never engaged) |
 
 Needle contract (cactus-needle apis.md):
 
@@ -93,9 +93,11 @@ Needle contract (cactus-needle apis.md):
 - `EVPRTR_NEEDLE_MIN_CONFIDENCE` defaults to **`0.35`** (set `0` to disable gating).
 - Optional `system` facts (`date` / `locale` / `device` / `location`) only — not instructions.
 
+**Policy:** Maple → Needle (structure / correct) is allowed. **Needle → Maple-with-tools is not** (`needle_miss_stop` instead of `fallback_maple`).
+
 Engine default path on the author machine: `F:/LLM/models/needle2/libneedle.dll` (`EVPRTR_NEEDLE_LIB_PATH` / `NEEDLE_LIB_PATH`). Disable with `EVPRTR_NEEDLE_ENABLED=0`.
 
-Trace stage: `tool_select` (`maple_nl_start` / `maple_nl_done` / `done` / `fallback_maple`). Summary: `needle_tool_path`, `needle_via`, `needle_empty_call`, `needle_confidence`.
+Trace stage: `tool_select` (`maple_nl_start` / `maple_nl_done` / `done` / `needle_miss_stop`). Summary: `needle_tool_path`, `needle_via`, `needle_empty_call`, `needle_confidence`.
 
 ## Side-effect control
 

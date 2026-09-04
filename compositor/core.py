@@ -117,8 +117,8 @@ class Compositor:
             if needle_chunk_writes is None
             else needle_chunk_writes
         )
-        # Default: Maple-with-tools first; Needle only structures/repairs misses.
-        # Set EVPRTR_MAPLE_TOOLS_PRIMARY=0 to restore Maple-NL→Needle as primary.
+        # Preferred: Maple-with-tools first; Needle only structures/repairs misses.
+        # Set EVPRTR_MAPLE_TOOLS_PRIMARY=0 for legacy Maple-NL→Needle (no Needle→Maple).
         self.maple_tools_primary = (
             _env_flag("EVPRTR_MAPLE_TOOLS_PRIMARY", "1")
             if maple_tools_primary is None
@@ -141,6 +141,7 @@ class Compositor:
             return await self._maple_tools_primary_path(request, session)
 
         # Preferred: Maple NL plan → Needle structures (and optional chunk apply).
+        # If Needle misses, stop — never open a second Maple-with-tools turn.
         nl_result = await self._maybe_maple_nl_needle(request, session)
         if nl_result is not None:
             return await self._finish_tool_result(nl_result, session, request)
@@ -149,6 +150,7 @@ class Compositor:
         if tool_result is not None:
             return await self._finish_tool_result(tool_result, session, request)
 
+        # Maple-with-tools only when Needle was never engaged this turn.
         return await self._maple_with_tools_finish(request, session)
 
     async def _maple_with_tools_finish(
@@ -786,11 +788,22 @@ class Compositor:
             session.event(
                 "tool_select",
                 "ok",
-                phase="fallback_maple",
+                phase="needle_miss_stop",
                 reason=miss_reason or getattr(self.tool_path, "last_skip_reason", None),
                 policy_id=self.tool_path.policy_id,
             )
-            return None
+            # Policy: never Needle → Maple-with-tools. Stop on Maple NL (or brief note).
+            stop_body = (instruction or "").strip() or (
+                "I could not structure a schema-valid tool call from the plan."
+            )
+            return ToolPathResult(
+                response=no_tool_call_stop_response(stop_body, model=self.public_model_id),
+                used_needle=True,
+                confidence=None,
+                empty_call=True,
+                reasoning="needle_miss_no_maple_retry",
+                via="needle_miss_stop",
+            )
         result = self._finalize_nl_result(result, user_task)
         session.event(
             "tool_select",
@@ -824,9 +837,7 @@ class Compositor:
             return None
         if not self.tool_path.enabled_for(request):
             return None
-        # When NL→Needle is enabled, direct user-text Needle is a second chance
-        # only after Maple-with-tools; skip here to avoid double Needle on the
-        # raw user prompt (often weaker than Maple NL).
+        # When NL→Needle is enabled, skip direct user-text Needle (weaker than Maple NL).
         if self.needle_via_maple_nl:
             return None
         session.event(
@@ -846,12 +857,34 @@ class Compositor:
             )
             return None
         if result is None:
+            skip = getattr(self.tool_path, "last_skip_reason", None) or ""
+            engaged = bool(getattr(self.tool_path, "last_complete", None)) or any(
+                tag in skip for tag in ("empty_call", "low_confidence", "empty_instruction")
+            )
+            if engaged:
+                # Needle ran (or refused after complete) — do not fall back to Maple.
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="needle_miss_stop",
+                    policy_id=self.tool_path.policy_id,
+                    reason=skip or None,
+                )
+                stop_body = "I could not produce a schema-valid tool call for the available tools."
+                return ToolPathResult(
+                    response=no_tool_call_stop_response(stop_body, model=self.public_model_id),
+                    used_needle=True,
+                    confidence=None,
+                    empty_call=True,
+                    reasoning="needle_miss_no_maple_retry",
+                    via="needle_miss_stop",
+                )
             session.event(
                 "tool_select",
                 "ok",
-                phase="fallback_maple",
+                phase="needle_skip",
                 policy_id=self.tool_path.policy_id,
-                reason=getattr(self.tool_path, "last_skip_reason", None),
+                reason=skip or None,
             )
             return None
         session.event(
