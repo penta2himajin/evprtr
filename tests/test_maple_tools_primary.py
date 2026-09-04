@@ -56,7 +56,11 @@ async def test_maple_tools_primary_needle_structures_when_maple_empty(tmp_path):
 
     class Maple:
         async def chat_completions(self, payload):
-            assert "tools" in payload
+            # Markup primary: tools become <tools> in system; OpenAI tools popped.
+            assert "tools" not in payload
+            sys0 = (payload.get("messages") or [{}])[0]
+            assert sys0.get("role") == "system"
+            assert "<tools>" in (sys0.get("content") or "")
             return {
                 "choices": [
                     {
@@ -120,7 +124,8 @@ async def test_maple_tools_primary_needle_structures_when_maple_empty(tmp_path):
 async def test_maple_tools_primary_passes_prose_without_needle(tmp_path):
     class Maple:
         async def chat_completions(self, payload):
-            assert "tools" in payload
+            assert "tools" not in payload
+            assert "<tools>" in ((payload.get("messages") or [{}])[0].get("content") or "")
             return {
                 "choices": [
                     {
@@ -170,9 +175,11 @@ async def test_maple_tools_primary_passes_prose_without_needle(tmp_path):
     assert "Chibi is a measurement harness" in (choice["message"].get("content") or "")
     phases = [e.detail.get("phase") for e in result.trace.events if isinstance(e.detail, dict)]
     assert "maple_tools_primary" in phases
-    assert "maple_prose_stop" in phases
+    assert "maple_final_content" in phases
     assert "maple_nl_start" not in phases
+    assert "needle_structure_fallback" not in phases
     assert result.trace.response_summary.get("maple_tools_primary") is True
+    assert result.trace.response_summary.get("needle_via") == "maple_final_content"
 
 
 @pytest.mark.asyncio

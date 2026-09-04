@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -68,3 +69,39 @@ async def test_omits_authorization_when_api_key_unset():
         await runtime.aclose()
 
     assert seen["has_authorization"] is False
+
+
+@pytest.mark.asyncio
+async def test_forwards_structured_outputs_and_guided_grammar():
+    """Harness grammar fields must reach upstream (oMLX GBNF / xgrammar)."""
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json=_ok_body())
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    runtime = OpenAICompatRuntime(
+        "http://upstream.test/v1",
+        upstream_model="upstream-model",
+        client=client,
+    )
+    try:
+        await runtime.chat_completions(
+            {
+                "model": "ignored",
+                "messages": [{"role": "user", "content": "hi"}],
+                "structured_outputs": {"grammar": 'root ::= "ZQX"'},
+                "guided_grammar": 'root ::= "ZQX"',
+                "response_format": {"type": "json_object"},
+            }
+        )
+    finally:
+        await runtime.aclose()
+
+    body = seen["body"]
+    assert body["structured_outputs"] == {"grammar": 'root ::= "ZQX"'}
+    assert body["guided_grammar"] == 'root ::= "ZQX"'
+    assert body["response_format"] == {"type": "json_object"}
+    assert body["model"] == "upstream-model"
+    assert body["stream"] is False

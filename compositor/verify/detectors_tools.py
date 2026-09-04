@@ -177,7 +177,11 @@ def _offered_mutation_tools(request: dict[str, Any] | None) -> bool:
 
 
 class MissingMutationDetector:
-    """Task needs write/edit but the model stopped with only read/prose."""
+    """Retired from the default verify bundle (keyword mutation classification).
+
+    Kept as a peelable module for experiments; do not re-wire without an
+    explicit policy change.
+    """
 
     policy_id = MISSING_MUTATION_ID
 

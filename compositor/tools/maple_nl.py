@@ -49,8 +49,6 @@ def no_tool_call_assistant_content(maple_nl: str, *, user_task: str) -> str | No
     """Stop-content when NL is an intentional no-tool answer; else None."""
     if not is_no_tool_call_nl(maple_nl):
         return None
-    if task_wants_mutation(user_task):
-        return None
     body = strip_no_tool_call_marker(maple_nl)
     return body if body else None
 
@@ -453,8 +451,8 @@ def synthetic_edit_replace_response(user_task: str) -> dict[str, Any] | None:
 
 
 def synthetic_mutation_response(user_task: str) -> dict[str, Any] | None:
-    """Best-effort deterministic tool_calls for explicit create/edit prompts."""
-    return synthetic_create_file_response(user_task) or synthetic_edit_replace_response(user_task)
+    """Disabled: deterministic mutation forge retired (stub for call-site cleanup)."""
+    return None
 
 
 def task_wants_mutation(user_task: str) -> bool:

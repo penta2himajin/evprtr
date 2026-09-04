@@ -152,6 +152,7 @@ def test_synthetic_create_and_edit():
     from compositor.tools.maple_nl import (
         synthetic_create_file_response,
         synthetic_edit_replace_response,
+        synthetic_mutation_response,
     )
 
     w = synthetic_create_file_response(
@@ -168,6 +169,11 @@ def test_synthetic_create_and_edit():
     eargs = json.loads(e["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
     assert eargs["path"].endswith("x.txt")
     assert eargs["edits"][0] == {"oldText": "alpha", "newText": "gamma"}
+
+    # Public forge entry is disabled (helpers remain until deleted).
+    assert synthetic_mutation_response(
+        "Create file a.txt with exactly this content:\nhi\n"
+    ) is None
 
 
 def test_repair_degenerate_stays_agentic():
@@ -208,50 +214,16 @@ def test_bundle_sanitizes_degenerate_tool_calls():
     assert msg.get("tool_calls") in (None, [])
 
 
-def test_missing_mutation_detector_flags_read_only():
-    from compositor.verify.detectors_tools import MissingMutationDetector
+def test_missing_mutation_detector_not_in_default_bundle():
+    """Keyword mutation classification retired from the default verify stack."""
+    from compositor.verify.detectors_tools import MISSING_MUTATION_ID, MissingMutationDetector
 
-    d = MissingMutationDetector()
-    request = {
-        "messages": [
-            {
-                "role": "user",
-                "content": "Create file notes.txt with content hello via write tool",
-            }
-        ],
-        "tools": [
-            {
-                "type": "function",
-                "function": {"name": "write", "parameters": {"type": "object"}},
-            },
-            {
-                "type": "function",
-                "function": {"name": "read", "parameters": {"type": "object"}},
-            },
-        ],
-    }
-    hit = d.diagnose(
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "c1",
-                    "type": "function",
-                    "function": {
-                        "name": "read",
-                        "arguments": '{"path": "notes.txt"}',
-                    },
-                }
-            ],
-        },
-        request=request,
-    )
-    assert hit is not None
-    assert hit.kind == "missing_mutation"
+    bundle = VerifyBundle.maple_preview()
+    assert all(d.policy_id != MISSING_MUTATION_ID for d in bundle.detectors)
+    assert MissingMutationDetector.policy_id == MISSING_MUTATION_ID
 
 
-def test_bundle_sanitizes_missing_mutation():
+def test_bundle_does_not_flag_read_only_on_create_task():
     bundle = VerifyBundle.maple_preview()
     request = {
         "messages": [
@@ -291,10 +263,4 @@ def test_bundle_sanitizes_missing_mutation():
             }
         ]
     }
-    diagnosis = bundle.diagnose(upstream, request=request)
-    assert diagnosis is not None
-    assert diagnosis.kind == "missing_mutation"
-    cleaned = bundle.sanitize(upstream, diagnosis)
-    msg = cleaned["choices"][0]["message"]
-    assert msg.get("tool_calls") in (None, [])
-    assert "write/edit" in str(msg.get("content") or "")
+    assert bundle.diagnose(upstream, request=request) is None
