@@ -32,12 +32,10 @@ from compositor.tools.maple_nl import (
     parse_create_file,
     prepare_needle_instruction,
     synthetic_mutation_response,
-    task_wants_mutation,
-    tool_calls_satisfy_mutation,
     user_task_instruction,
 )
-from compositor.tools.path import NeedleToolPath, ToolPathResult
 from compositor.tools.maple_tool_markup import maple_tool_markup_request
+from compositor.tools.path import NeedleToolPath, ToolPathResult
 from compositor.tools.pseudo_tool import (
     apply_pseudo_tool_calls_to_response,
     parse_pseudo_tool_calls,
@@ -197,10 +195,10 @@ class Compositor:
     ) -> ComposeResult:
         """Maple-with-tools first; Needle structures/repairs only on misses.
 
-        - Valid ``tool_calls`` → verify (Needle corrects degenerate args).
-        - Pseudo ``<tool_call>`` markup → deterministic promote, else Needle.
-        - Prose content without tools → stop (do not send essays to Needle).
-        - Empty / unusable Maple → Needle structure fallback from task/reasoning.
+        - Valid ``tool_calls`` → verify (Needle may correct degenerate args).
+        - Pseudo ``<tool_call>`` markup → deterministic promote; broken → Needle.
+        - Non-empty prose without tools → present as final content (no Needle).
+        - Empty/thin Maple → Needle structure fallback from task/reasoning.
         """
         session.event(
             "tool_select",
@@ -296,7 +294,7 @@ class Compositor:
                     )
                     structured = pseudo
                 else:
-                    # Broken markup → ask Needle to normalize/structure.
+                    # Broken markup → Needle normalize/structure (insurance).
                     fb = await self._needle_structure_fallback(
                         request,
                         session,
@@ -306,47 +304,48 @@ class Compositor:
                     if fb is not None:
                         return await self._finish_tool_result(fb, session, request)
 
-            if not structured and len(maple_content.strip()) >= 40:
-                # Intentional answer — do not Needle-structure prose.
-                session.event(
-                    "tool_select",
-                    "ok",
-                    phase="maple_prose_stop",
-                    content_len=len(maple_content),
-                    policy_id="maple_tools_primary.v1",
-                )
-                try:
-                    presented = self._present(upstream)
-                    presented, buffered_ids = self._buffer_side_effects(
-                        presented, session, session.trace_id
-                    )
-                    session.event("present", "ok", via="maple_prose_stop", prose_stop=True)
-                except Exception as exc:  # noqa: BLE001
-                    session.fail(FailureLocus.PRESENT, str(exc), stage="present")
-                    session.finish(ok=False)
-                    raise
-                summary = summarize_response(presented)
-                summary["repetition_repaired"] = False
-                summary["needle_tool_path"] = False
-                summary["maple_tools_primary"] = True
-                summary["needle_via"] = "maple_prose_stop"
-                summary["buffered_approvals"] = buffered_ids
-                trace = session.finish(ok=True, response_summary=summary)
-                return ComposeResult(response=presented, trace=trace)
-
             if not structured:
-                # Empty / thin Maple → Needle structures from task (or reasoning).
-                seed = maple_reasoning.strip() or maple_content.strip() or user_task
-                fb = await self._needle_structure_fallback(
-                    request,
-                    session,
-                    instruction=seed,
-                    reason="maple_empty_or_thin",
-                )
-                if fb is not None:
-                    return await self._finish_tool_result(fb, session, request)
+                # Empty/thin only → Needle structure. Longer prose is the final answer.
+                if len(maple_content.strip()) < 40:
+                    seed = maple_reasoning.strip() or maple_content.strip() or user_task
+                    fb = await self._needle_structure_fallback(
+                        request,
+                        session,
+                        instruction=seed,
+                        reason="maple_empty_or_thin",
+                    )
+                    if fb is not None:
+                        return await self._finish_tool_result(fb, session, request)
+                else:
+                    session.event(
+                        "tool_select",
+                        "ok",
+                        phase="maple_final_content",
+                        content_len=len(maple_content),
+                        policy_id="maple_tools_primary.v1",
+                    )
+                    try:
+                        presented = self._present(upstream)
+                        presented, buffered_ids = self._buffer_side_effects(
+                            presented, session, session.trace_id
+                        )
+                        session.event(
+                            "present", "ok", via="maple_final_content", final_content=True
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        session.fail(FailureLocus.PRESENT, str(exc), stage="present")
+                        session.finish(ok=False)
+                        raise
+                    summary = summarize_response(presented)
+                    summary["repetition_repaired"] = False
+                    summary["needle_tool_path"] = False
+                    summary["maple_tools_primary"] = True
+                    summary["needle_via"] = "maple_final_content"
+                    summary["buffered_approvals"] = buffered_ids
+                    trace = session.finish(ok=True, response_summary=summary)
+                    return ComposeResult(response=presented, trace=trace)
 
-        # Structured (or last-resort empty) → verify; Needle may correct degenerate.
+        # Structured (or last-resort empty/thin without Needle) → verify.
         upstream, repaired = await self._verify_and_repair(request, upstream, session)
         upstream = coerce_read_directory_to_ls(
             align_create_file_tool_calls(upstream, original_user_text(request))
@@ -504,8 +503,6 @@ class Compositor:
             return False, getattr(self.tool_path, "last_skip_reason", None)
         if result.empty_call:
             return False, "empty_call"
-        if task_wants_mutation(user_task) and not tool_calls_satisfy_mutation(result.response):
-            return False, "missing_mutation"
         message = assistant_message(result.response)
         if message is None:
             return False, "no_message"
@@ -868,7 +865,6 @@ class Compositor:
             if diagnosis.kind not in {
                 "pseudo_tool_markup",
                 "degenerate_tool_args",
-                "missing_mutation",
             } and self.verify.has_usable_content(sanitized, request=request):
                 session.event(
                     "verify",
@@ -891,7 +887,7 @@ class Compositor:
 
             if (
                 allow_needle_correct
-                and diagnosis.kind in {"degenerate_tool_args", "missing_mutation"}
+                and diagnosis.kind == "degenerate_tool_args"
                 and self.needle_correct_degenerate
                 and self.tool_path is not None
                 and self.tool_path.enabled_for(request)
@@ -941,10 +937,9 @@ class Compositor:
         del sanitized
         detail = diagnosis.detail or {}
         task = original_user_text(request)
-        # Prefer imperative create-file / mutation briefs; soft correction alone
-        # often yields another unusable edit (live smoke4).
+        # Prefer imperative create-file briefs when the task parses; else soft correction.
         candidates: list[str] = []
-        if diagnosis.kind == "missing_mutation" or parse_create_file(task) is not None:
+        if parse_create_file(task) is not None:
             candidates.append(user_task_instruction(task))
         else:
             candidates.append(
@@ -956,10 +951,9 @@ class Compositor:
                     failed_preview=str(detail),
                 )
             )
-            if task_wants_mutation(task):
-                ut = user_task_instruction(task)
-                if ut not in candidates:
-                    candidates.append(ut)
+            ut = user_task_instruction(task)
+            if ut not in candidates:
+                candidates.append(ut)
 
         session.event(
             "repair",

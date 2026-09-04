@@ -89,13 +89,16 @@ def test_is_no_tool_call_nl_requires_explicit_marker():
     assert "No tool call needed" not in body
 
 
-def test_no_tool_call_assistant_content_blocks_mutation_tasks():
+def test_no_tool_call_assistant_content_allows_intentional_stop():
     from compositor.tools.maple_nl import no_tool_call_assistant_content
 
     nl = "No tool call needed.\n\nI would create the file but here is a summary instead."
-    assert (
-        no_tool_call_assistant_content(nl, user_task="Create file x.txt with content: hi") is None
+    # Mutation keyword in the user task no longer blocks an explicit NL stop.
+    body = no_tool_call_assistant_content(
+        nl, user_task="Create file x.txt with content: hi"
     )
+    assert body is not None
+    assert body.startswith("I would create")
     assert no_tool_call_assistant_content(
         nl,
         user_task="Explore this repository and explain what it does.",
@@ -768,12 +771,8 @@ async def test_nl_empty_call_retry_uses_allowlisted_brief(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_missing_mutation_read_then_correct_write(tmp_path):
-    """NL miss → Maple read-only settle → MissingMutation → Needle write.
-
-    Task intentionally avoids create-file regex so synthetic fallback does not
-    short-circuit before MissingMutation can fire.
-    """
+async def test_nl_path_presents_read_without_missing_mutation_coerce(tmp_path):
+    """Without MissingMutation, a read-only Maple settle is presented as-is."""
 
     class Maple:
         async def chat_completions(self, payload):
@@ -802,37 +801,16 @@ async def test_missing_mutation_read_then_correct_write(tmp_path):
             }
 
     class RT(NeedleToolRuntime):
-        def __init__(self):
-            self.n = 0
-
         def available(self):
             return True
 
         def complete(self, query, tools, *, max_new_tokens=None):
-            self.n += 1
-            # NL first + NL user-task retry abstain; 3rd call is Needle correct.
-            if self.n >= 3 and "notes.txt" in query and "hello" in query.lower():
-                return NeedleCompleteResult(
-                    function_calls=[
-                        {
-                            "name": "write",
-                            "arguments": {
-                                "path": "notes.txt",
-                                "content": "hello",
-                            },
-                        }
-                    ],
-                    confidence=0.9,
-                    reasoning=None,
-                    raw={},
-                )
             return NeedleCompleteResult([], 0.0, "abstain", {})
 
-    rt = RT()
     c = Compositor(
         Maple(),
         traces=TraceStore(tmp_path),
-        tool_path=NeedleToolPath(rt),
+        tool_path=NeedleToolPath(RT()),
         needle_via_maple_nl=True,
         maple_tools_primary=False,
         needle_chunk_writes=False,
@@ -879,16 +857,10 @@ async def test_missing_mutation_read_then_correct_write(tmp_path):
         }
     )
     call = result.response["choices"][0]["message"]["tool_calls"][0]
-    assert call["function"]["name"] == "write"
-    args = call["function"]["arguments"]
-    if isinstance(args, str):
-        args = json.loads(args)
-    assert args["path"] == "notes.txt"
-    assert args["content"] == "hello"
-    assert rt.n >= 3
+    assert call["function"]["name"] == "read"
     kinds = [
         e.detail.get("kind")
         for e in result.trace.events
         if e.stage == "verify" and isinstance(e.detail, dict)
     ]
-    assert "missing_mutation" in kinds
+    assert "missing_mutation" not in kinds

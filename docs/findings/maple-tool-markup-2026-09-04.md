@@ -46,6 +46,6 @@ Pi `--tools read,ls,grep` against evprtr `:8741` → oMLX Maple:
 | `ls` | executed with absolute repo path |
 | `grep Overview AGENTS.md` | executed |
 | `read AGENTS.md` | executed |
-| final | `maple_prose_stop` plain text gist; `EXIT:0`; no tool loop |
+| final | `maple_final_content` plain text gist; `EXIT:0`; no tool loop |
 
 Trace phases consistently include `maple_tool_markup_attached`. No `tools_grammar_*`.

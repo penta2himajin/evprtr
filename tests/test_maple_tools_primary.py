@@ -175,9 +175,11 @@ async def test_maple_tools_primary_passes_prose_without_needle(tmp_path):
     assert "Chibi is a measurement harness" in (choice["message"].get("content") or "")
     phases = [e.detail.get("phase") for e in result.trace.events if isinstance(e.detail, dict)]
     assert "maple_tools_primary" in phases
-    assert "maple_prose_stop" in phases
+    assert "maple_final_content" in phases
     assert "maple_nl_start" not in phases
+    assert "needle_structure_fallback" not in phases
     assert result.trace.response_summary.get("maple_tools_primary") is True
+    assert result.trace.response_summary.get("needle_via") == "maple_final_content"
 
 
 @pytest.mark.asyncio
