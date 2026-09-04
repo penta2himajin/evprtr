@@ -14,7 +14,7 @@
 | `EVPRTR_NEEDLE_VIA_MAPLE_NL` | Maple NL → Needle (default `1`) |
 | `EVPRTR_NEEDLE_CHUNK_WRITES` | Fenced-file chunk apply (default `1`) |
 | `EVPRTR_NEEDLE_CORRECT_DEGENERATE` | Post-hoc Needle fix (default `1`) |
-| `EVPRTR_NEEDLE_MAX_NEW_TOKENS` | Needle budget (default `1024`; engine default was 256) |
+| `EVPRTR_NEEDLE_MAX_NEW_TOKENS` | Needle budget (default `256`; matches engine sliding window) |
 
 ## Read-only settle — implemented
 

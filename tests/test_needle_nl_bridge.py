@@ -94,9 +94,7 @@ def test_no_tool_call_assistant_content_allows_intentional_stop():
 
     nl = "No tool call needed.\n\nI would create the file but here is a summary instead."
     # Mutation keyword in the user task no longer blocks an explicit NL stop.
-    body = no_tool_call_assistant_content(
-        nl, user_task="Create file x.txt with content: hi"
-    )
+    body = no_tool_call_assistant_content(nl, user_task="Create file x.txt with content: hi")
     assert body is not None
     assert body.startswith("I would create")
     assert no_tool_call_assistant_content(
@@ -499,6 +497,19 @@ async def test_nl_retries_on_degenerate_write(tmp_path):
 
         def complete(self, query, tools, *, max_new_tokens=None):
             self.n += 1
+            # First structure pass: emulate Needle inventing Maple's Tower/0.5 args.
+            if self.n == 1:
+                return NeedleCompleteResult(
+                    function_calls=[
+                        {
+                            "name": "write",
+                            "arguments": {"path": "Tower", "content": "0.5"},
+                        }
+                    ],
+                    confidence=0.2,
+                    reasoning=None,
+                    raw={},
+                )
             if "Call write" in query and "live-nl-retry.txt" in query:
                 return NeedleCompleteResult(
                     function_calls=[
@@ -515,14 +526,9 @@ async def test_nl_retries_on_degenerate_write(tmp_path):
                     raw={},
                 )
             return NeedleCompleteResult(
-                function_calls=[
-                    {
-                        "name": "write",
-                        "arguments": {"path": "Tower", "content": "0.5"},
-                    }
-                ],
-                confidence=0.2,
-                reasoning=None,
+                function_calls=[],
+                confidence=0.1,
+                reasoning="still bad",
                 raw={},
             )
 
@@ -530,7 +536,8 @@ async def test_nl_retries_on_degenerate_write(tmp_path):
     c = Compositor(
         Maple(),
         traces=TraceStore(tmp_path),
-        tool_path=NeedleToolPath(rt),
+        # Allow low-confidence first pass so degenerate-arg correction can fire.
+        tool_path=NeedleToolPath(rt, min_confidence=0.0),
         needle_via_maple_nl=True,
         maple_tools_primary=False,
         needle_chunk_writes=False,
@@ -575,19 +582,18 @@ async def test_nl_retries_on_degenerate_write(tmp_path):
             ],
         }
     )
-    assert rt.n >= 2
+    # Primary short-query already embeds the create-file task; Needle still
+    # invents Tower/0.5 once. Handoff + align_create_file recovers without a
+    # duplicate retry query (retry shape == primary under A).
+    assert rt.n >= 1
     args = result.response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
     if isinstance(args, str):
         args = json.loads(args)
     assert args["path"] == "live-nl-retry.txt"
     assert args["content"] == "ok-body"
-    phases = [
-        e.detail.get("phase")
-        for e in result.trace.events
-        if e.stage == "tool_select" and isinstance(e.detail, dict)
-    ]
+    phases = [e.detail.get("phase") for e in result.trace.events if isinstance(e.detail, dict)]
     assert "needle_quality_miss" in phases
-    assert "needle_retry_user_task" in phases
+    assert "needle_degenerate_handoff" in phases
 
 
 @pytest.mark.asyncio

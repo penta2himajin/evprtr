@@ -20,6 +20,13 @@ from compositor.tools.convert import (
     openai_tools_to_needle,
     should_route_tools_to_needle,
 )
+from compositor.tools.needle_contract import (
+    DEFAULT_NEEDLE_MAX_TOOLS,
+    needle_system_facts,
+    normalize_needle_query,
+    select_needle_tools,
+)
+from compositor.verify.repair import original_user_text
 
 
 @dataclass
@@ -41,26 +48,36 @@ class NeedleToolPath:
         self,
         runtime: NeedleToolRuntime,
         *,
-        min_confidence: float = 0.0,
+        min_confidence: float = 0.35,
         public_model_id: str = "evprtr",
         chunk_chars: int = 900,
         prefer_chunk_writes: bool = True,
+        max_tools: int = DEFAULT_NEEDLE_MAX_TOOLS,
     ) -> None:
         self.runtime = runtime
         self.min_confidence = min_confidence
         self.public_model_id = public_model_id
         self.chunk_chars = max(200, chunk_chars)
         self.prefer_chunk_writes = prefer_chunk_writes
+        self.max_tools = max(1, max_tools)
         self.last_skip_reason: str | None = None
         # Last Needle.complete I/O for traces (measurement fidelity).
         self.last_complete: dict[str, Any] | None = None
+        if getattr(self.runtime, "system", None) in (None, ""):
+            self.runtime.system = needle_system_facts()
 
     def pop_last_complete(self) -> dict[str, Any]:
         detail = dict(self.last_complete or {})
         self.last_complete = None
         return detail
 
-    def _record_complete(self, query: str, result: NeedleCompleteResult) -> None:
+    def _record_complete(
+        self,
+        query: str,
+        result: NeedleCompleteResult,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> None:
         raw = result.raw if isinstance(result.raw, dict) else {}
         # Keep raw small: drop weighty keys if present; retain calls/reasoning.
         compact_raw = {
@@ -72,6 +89,9 @@ class NeedleToolPath:
             "needle_confidence": result.confidence,
             "needle_reasoning": result.reasoning,
             "needle_raw": compact_raw,
+            "needle_tool_names": [
+                str(t.get("name")) for t in (tools or []) if isinstance(t, dict) and t.get("name")
+            ],
         }
 
     def enabled_for(self, request: dict[str, Any]) -> bool:
@@ -98,17 +118,21 @@ class NeedleToolPath:
             self.last_skip_reason = "not_enabled"
             return None
 
-        needle_tools = self._needle_tools(request)
-        if not needle_tools:
-            return None
-
         text = (instruction or "").strip()
         if not text:
             self.last_skip_reason = "empty_instruction"
             return None
 
-        result = self.runtime.complete(text, needle_tools)
-        self._record_complete(text, result)
+        needle_tools = self._needle_tools(request, hint=text)
+        if not needle_tools:
+            return None
+
+        user_task = original_user_text(request) or text
+        tool_names = [str(t.get("name")) for t in needle_tools if t.get("name")]
+        query = normalize_needle_query(text, user_task=user_task, tool_names=tool_names)
+
+        result = self.runtime.complete(query, needle_tools)
+        self._record_complete(query, result, tools=needle_tools)
         return self._result_from_complete(result, request, needle_tools, via=via)
 
     def apply_chunked_file(
@@ -127,7 +151,9 @@ class NeedleToolPath:
 
         chunks = split_content(content, max_chars=self.chunk_chars)
         needle_tools = [
-            t for t in self._needle_tools(request) if t.get("name") in {"write", "edit"}
+            t
+            for t in self._needle_tools(request, hint=f"Call write. path={path}")
+            if t.get("name") in {"write", "edit"}
         ]
         if not needle_tools:
             self.last_skip_reason = "no_write_edit_tools"
@@ -137,7 +163,7 @@ class NeedleToolPath:
             # Single shot: ask Needle to write the whole file; fall back to plan.
             query = needle_chunk_query(path, content, index=0, total=1)
             result = self.runtime.complete(query, needle_tools)
-            self._record_complete(query, result)
+            self._record_complete(query, result, tools=needle_tools)
             shaped = self._result_from_complete(
                 result, request, needle_tools, via=via, allow_empty_fallback=False
             )
@@ -165,7 +191,7 @@ class NeedleToolPath:
             probe_q,
             [t for t in needle_tools if t.get("name") == "write"] or needle_tools,
         )
-        self._record_complete(probe_q, probe)
+        self._record_complete(probe_q, probe, tools=needle_tools)
         used_needle = bool(probe.function_calls)
         message = {
             "role": "assistant",
@@ -184,14 +210,15 @@ class NeedleToolPath:
             via=via if used_needle else f"{via}_deterministic",
         )
 
-    def _needle_tools(self, request: dict[str, Any]) -> list[dict[str, Any]]:
+    def _needle_tools(self, request: dict[str, Any], *, hint: str = "") -> list[dict[str, Any]]:
         openai_tools = request.get("tools")
         raw_count = len(openai_tools) if isinstance(openai_tools, list) else 0
         needle_tools = openai_tools_to_needle(openai_tools)
         needle_tools = filter_tools_for_choice(needle_tools, request.get("tool_choice"))
         if not needle_tools:
             self.last_skip_reason = f"empty_converted_tools raw_count={raw_count}"
-        return needle_tools
+            return needle_tools
+        return select_needle_tools(needle_tools, hint=hint, max_tools=self.max_tools)
 
     def _result_from_complete(
         self,

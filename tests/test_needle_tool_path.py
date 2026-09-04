@@ -9,7 +9,6 @@ from compositor.tools.convert import (
 )
 from compositor.tools.path import NeedleToolPath
 
-
 OPENAI_TOOLS = [
     {
         "type": "function",
@@ -245,3 +244,127 @@ def test_tool_path_empty_call_auto_falls_back_to_maple():
     assert path.last_skip_reason is not None
     assert "empty_call_fallback" in path.last_skip_reason
 
+
+def _openai_named(names: list[str]) -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": n,
+                "description": f"{n} tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for n in names
+    ]
+
+
+def test_tool_path_caps_tools_at_five_and_shortens_query():
+    seen: dict = {}
+
+    class RT(NeedleToolRuntime):
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            seen["query"] = query
+            seen["tools"] = [t["name"] for t in tools]
+            return NeedleCompleteResult(
+                function_calls=[{"name": "ls", "arguments": {"path": "."}}],
+                confidence=0.9,
+                reasoning=None,
+                raw={},
+            )
+
+    names = [
+        "write",
+        "edit",
+        "read",
+        "ls",
+        "grep",
+        "find",
+        "bash",
+        "web_search",
+        "browser",
+    ]
+    essay = (
+        "I should carefully explore the repository layout and then list files "
+        "in the current directory using an appropriate tool before editing.\n"
+    ) * 8
+    path = NeedleToolPath(RT())
+    result = path.handle(
+        {
+            "messages": [{"role": "user", "content": essay}],
+            "tools": _openai_named(names),
+            "tool_choice": "auto",
+        }
+    )
+    assert result is not None
+    assert len(seen["tools"]) == 5
+    assert len(seen["query"]) <= 160
+    assert seen["query"].lower().startswith("call ")
+    detail = path.pop_last_complete()
+    assert detail["needle_tool_names"] == seen["tools"]
+
+
+def test_tool_path_rejects_low_confidence_by_default():
+    class RT(NeedleToolRuntime):
+        def available(self):
+            return True
+
+        def complete(self, query, tools, *, max_new_tokens=None):
+            return NeedleCompleteResult(
+                function_calls=[{"name": "get_weather", "arguments": {"city": "Tokyo"}}],
+                confidence=0.1,
+                reasoning="guess",
+                raw={},
+            )
+
+    path = NeedleToolPath(RT())  # default min_confidence=0.35
+    result = path.handle(
+        {
+            "messages": [{"role": "user", "content": "Weather in Tokyo?"}],
+            "tools": OPENAI_TOOLS,
+            "tool_choice": "auto",
+        }
+    )
+    assert result is None
+    assert path.last_skip_reason is not None
+    assert "low_confidence" in path.last_skip_reason
+
+
+def test_needle_runtime_default_max_new_tokens_is_256(monkeypatch):
+    monkeypatch.delenv("EVPRTR_NEEDLE_MAX_NEW_TOKENS", raising=False)
+    seen: dict = {}
+
+    class Agent:
+        def reset(self):
+            return None
+
+        def complete(self, text, max_new_tokens=0):
+            seen["max_new_tokens"] = max_new_tokens
+            return {"function_calls": [], "confidence": 0.9, "reasoning": None}
+
+    runtime = NeedleToolRuntime(factory=lambda tools, system=None: Agent())
+    runtime.complete("Call ls. path=.", [{"name": "ls", "parameters": {}}])
+    assert seen["max_new_tokens"] == 256
+
+
+def test_needle_runtime_passes_system_facts():
+    seen: dict = {}
+
+    class Agent:
+        def reset(self):
+            return None
+
+        def complete(self, text, max_new_tokens=0):
+            return {"function_calls": [], "confidence": 0.9}
+
+    def factory(*, tools, system=None):
+        seen["system"] = system
+        seen["n_tools"] = len(tools)
+        return Agent()
+
+    runtime = NeedleToolRuntime(factory=factory, system="date: 2026-09-04; locale: en-US")
+    runtime.complete("Call ls.", [{"name": "ls", "parameters": {}}])
+    assert "date:" in (seen["system"] or "")

@@ -273,7 +273,8 @@ def _maybe_needle_tool_path(public_model_id: str) -> NeedleToolPath | None:
     runtime = NeedleToolRuntime(lib_path=lib)
     if not runtime.available():
         return None
-    min_conf = float(_env("EVPRTR_NEEDLE_MIN_CONFIDENCE", "0") or "0")
+    # Gate weak Needle proposals; 0 disables. Official evals use calibrated conf.
+    min_conf = float(_env("EVPRTR_NEEDLE_MIN_CONFIDENCE", "0.35") or "0.35")
     return NeedleToolPath(
         runtime,
         min_confidence=min_conf,

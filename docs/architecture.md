@@ -85,7 +85,13 @@ Default bridge (peelable via env):
 | `tool_choice=none` | Needle skipped for that Maple NL pass only |
 | Needle unavailable | Fall back to Maple-with-tools |
 
-`EVPRTR_NEEDLE_MAX_NEW_TOKENS` (default `1024`) raises Needle’s generation budget above the engine default of 256.
+Needle contract (cactus-needle apis.md):
+
+- Queries are always short imperatives (`Call <tool>. …`), capped ~160 chars.
+- At most **5** tool schemas are passed (priority + hint); larger catalogues are truncated so Needle does not silently retrieve.
+- `EVPRTR_NEEDLE_MAX_NEW_TOKENS` defaults to **`256`** (engine / sliding-window default). Raise only if needed.
+- `EVPRTR_NEEDLE_MIN_CONFIDENCE` defaults to **`0.35`** (set `0` to disable gating).
+- Optional `system` facts (`date` / `locale` / `device` / `location`) only — not instructions.
 
 Engine default path on the author machine: `F:/LLM/models/needle2/libneedle.dll` (`EVPRTR_NEEDLE_LIB_PATH` / `NEEDLE_LIB_PATH`). Disable with `EVPRTR_NEEDLE_ENABLED=0`.
 

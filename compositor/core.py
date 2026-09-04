@@ -30,11 +30,11 @@ from compositor.tools.maple_nl import (
     no_tool_call_assistant_content,
     no_tool_call_stop_response,
     parse_create_file,
-    prepare_needle_instruction,
     synthetic_mutation_response,
     user_task_instruction,
 )
 from compositor.tools.maple_tool_markup import maple_tool_markup_request
+from compositor.tools.needle_contract import normalize_needle_query
 from compositor.tools.path import NeedleToolPath, ToolPathResult
 from compositor.tools.pseudo_tool import (
     apply_pseudo_tool_calls_to_response,
@@ -224,9 +224,7 @@ class Compositor:
         tools_grammar = False
         if _env_flag("EVPRTR_TOOLS_GRAMMAR", "0"):
             grammar_req = attach_tools_structured_outputs(maple_request)
-            if grammar_req is not maple_request and bool(
-                grammar_req.get("structured_outputs")
-            ):
+            if grammar_req is not maple_request and bool(grammar_req.get("structured_outputs")):
                 maple_request = grammar_req
                 tools_grammar = True
                 session.event(
@@ -387,17 +385,14 @@ class Compositor:
             if t.get("name")
         ]
         raw = (instruction or "").strip()
-        # Prefer a short imperative; long essays become user-task briefs.
-        if len(raw) > 400 or _looks_like_final_prose(raw):
-            needle_input = needle_retry_instruction(
-                maple_nl=raw,
-                user_task=user_task,
-                tool_names=tool_names,
-            )
-            if not needle_input.strip():
-                needle_input = user_task_instruction(user_task)
-        else:
-            needle_input = prepare_needle_instruction(raw, user_task=user_task)
+        # Always short imperative (Needle 256-token window + training shape).
+        needle_input = normalize_needle_query(
+            raw or user_task,
+            user_task=user_task,
+            tool_names=tool_names,
+        )
+        if not needle_input.strip():
+            needle_input = user_task_instruction(user_task)
 
         session.event(
             "tool_select",
@@ -604,7 +599,16 @@ class Compositor:
                 policy_id=self.tool_path.policy_id,
             )
 
-        needle_input = prepare_needle_instruction(instruction, user_task=user_task)
+        tool_names = [
+            str(t.get("name"))
+            for t in openai_tools_to_needle(request.get("tools"))
+            if t.get("name")
+        ]
+        needle_input = normalize_needle_query(
+            instruction,
+            user_task=user_task,
+            tool_names=tool_names,
+        )
         session.event(
             "tool_select",
             "ok",
@@ -637,6 +641,7 @@ class Compositor:
         result = await asyncio.to_thread(self.tool_path.handle_instruction, needle_input, request)
         self._emit_needle_complete(session, attempt="primary")
         ok, miss_reason = self._nl_needle_acceptable(result, request, user_task)
+        kept_degenerate: ToolPathResult | None = None
         if not ok:
             if result is not None:
                 session.event(
@@ -647,6 +652,9 @@ class Compositor:
                     via=getattr(result, "via", None),
                     policy_id=self.tool_path.policy_id,
                 )
+                if (miss_reason or "").startswith("degenerate:"):
+                    # Short-query primary may already equal retry; keep for verify.
+                    kept_degenerate = result
             result = None
         if result is None:
             # Intentional no-tool NL (marker) → stop with Maple prose; do not
@@ -708,6 +716,8 @@ class Compositor:
                         reason=miss2,
                         policy_id=self.tool_path.policy_id,
                     )
+                    if result is not None and (miss2 or "").startswith("degenerate:"):
+                        kept_degenerate = result
                     result = None
                     # Retry may still land on no-tool NL (same instruction).
                     stop_content = no_tool_call_assistant_content(instruction, user_task=user_task)
@@ -732,6 +742,24 @@ class Compositor:
                             reasoning="maple_nl_no_tool_call",
                             via="maple_nl_no_tool",
                         )
+            elif kept_degenerate is not None:
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="needle_degenerate_handoff",
+                    reason=miss_reason,
+                    policy_id=self.tool_path.policy_id,
+                )
+                return self._finalize_nl_result(kept_degenerate, user_task)
+        if result is None and kept_degenerate is not None:
+            session.event(
+                "tool_select",
+                "ok",
+                phase="needle_degenerate_handoff",
+                reason=miss_reason,
+                policy_id=self.tool_path.policy_id,
+            )
+            return self._finalize_nl_result(kept_degenerate, user_task)
         if result is None:
             synthetic = synthetic_mutation_response(user_task)
             if synthetic is not None:
@@ -1089,21 +1117,3 @@ def _presented_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return out
-
-
-def _looks_like_final_prose(text: str) -> bool:
-    """Heuristic: essay/summary that should not be fed raw to Needle."""
-    low = (text or "").lower()
-    if len(low) < 120:
-        return False
-    hints = (
-        "summary",
-        "overview",
-        "this repository",
-        "this project",
-        "based on my",
-        "highlights",
-        "in conclusion",
-        "## ",
-    )
-    return any(h in low for h in hints)

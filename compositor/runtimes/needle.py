@@ -29,6 +29,7 @@ class NeedleToolRuntime:
         *,
         lib_path: str | None = None,
         factory: Any | None = None,
+        system: str | None = None,
     ) -> None:
         self.lib_path = (
             lib_path
@@ -36,6 +37,7 @@ class NeedleToolRuntime:
             or os.environ.get("NEEDLE_LIB_PATH")
         )
         self._factory = factory
+        self.system = system
         self._agent: Any | None = None
         self._bound_tools_key: str | None = None
 
@@ -61,7 +63,8 @@ class NeedleToolRuntime:
         agent.reset()
         tokens = max_new_tokens
         if tokens is None:
-            tokens = int(os.environ.get("EVPRTR_NEEDLE_MAX_NEW_TOKENS", "1024") or "1024")
+            # Match cactus-needle engine default (256-token sliding window).
+            tokens = int(os.environ.get("EVPRTR_NEEDLE_MAX_NEW_TOKENS", "256") or "256")
         raw = agent.complete(query, max_new_tokens=max(64, tokens))
         calls = raw.get("function_calls") or []
         if not isinstance(calls, list):
@@ -75,17 +78,23 @@ class NeedleToolRuntime:
         )
 
     def _agent_for(self, tools: list[dict[str, Any]]) -> Any:
-        key = repr(tools)
+        key = repr((tools, self.system))
         if self._agent is not None and self._bound_tools_key == key:
             return self._agent
         if self.lib_path:
             os.environ["NEEDLE_LIB_PATH"] = self.lib_path
         if self._factory is not None:
-            agent = self._factory(tools=tools)
+            try:
+                agent = self._factory(tools=tools, system=self.system)
+            except TypeError:
+                agent = self._factory(tools=tools)
         else:
             import needle
 
-            agent = needle.Needle(tools=tools)
+            kwargs: dict[str, Any] = {"tools": tools}
+            if self.system:
+                kwargs["system"] = self.system
+            agent = needle.Needle(**kwargs)
         self._agent = agent
         self._bound_tools_key = key
         return agent

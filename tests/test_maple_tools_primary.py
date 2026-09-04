@@ -112,6 +112,8 @@ async def test_maple_tools_primary_needle_structures_when_maple_empty(tmp_path):
         }
     )
     assert rt.queries
+    assert all(len(q) <= 160 for q in rt.queries)
+    assert all(q.lower().startswith("call ") for q in rt.queries)
     msg = result.response["choices"][0]["message"]
     assert msg.get("tool_calls")
     assert msg["tool_calls"][0]["function"]["name"] == "ls"
