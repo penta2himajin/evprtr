@@ -56,7 +56,11 @@ async def test_maple_tools_primary_needle_structures_when_maple_empty(tmp_path):
 
     class Maple:
         async def chat_completions(self, payload):
-            assert "tools" in payload
+            # Markup primary: tools become <tools> in system; OpenAI tools popped.
+            assert "tools" not in payload
+            sys0 = (payload.get("messages") or [{}])[0]
+            assert sys0.get("role") == "system"
+            assert "<tools>" in (sys0.get("content") or "")
             return {
                 "choices": [
                     {
@@ -120,7 +124,8 @@ async def test_maple_tools_primary_needle_structures_when_maple_empty(tmp_path):
 async def test_maple_tools_primary_passes_prose_without_needle(tmp_path):
     class Maple:
         async def chat_completions(self, payload):
-            assert "tools" in payload
+            assert "tools" not in payload
+            assert "<tools>" in ((payload.get("messages") or [{}])[0].get("content") or "")
             return {
                 "choices": [
                     {

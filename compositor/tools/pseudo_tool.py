@@ -60,6 +60,18 @@ def _parse_block_body(body: str) -> tuple[str, dict[str, Any] | str] | None:
         name = str(data.get("name") or data.get("tool") or "").strip()
         if not name:
             return None
+        # HF / DeepGrove shape: {"name", "arguments": {...}}
+        if "arguments" in data:
+            args = data.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {"raw": args}
+            if not isinstance(args, dict):
+                args = {"value": args}
+            return name, args
+        # Loose flat object: {"name", "path": ...}
         args = {k: v for k, v in data.items() if k not in {"name", "tool"}}
         return name, args
 

@@ -37,6 +37,7 @@ from compositor.tools.maple_nl import (
     user_task_instruction,
 )
 from compositor.tools.path import NeedleToolPath, ToolPathResult
+from compositor.tools.maple_tool_markup import maple_tool_markup_request
 from compositor.tools.pseudo_tool import (
     apply_pseudo_tool_calls_to_response,
     parse_pseudo_tool_calls,
@@ -208,14 +209,28 @@ class Compositor:
             policy_id="maple_tools_primary.v1",
         )
         maple_request = request
+        # Primary: DeepGrove/HF-style <tools>/<tool_call> prompt (plain content OK).
+        markup_on = _env_flag("EVPRTR_MAPLE_TOOL_MARKUP", "1")
+        if markup_on:
+            marked = maple_tool_markup_request(request)
+            if marked is not request:
+                maple_request = marked
+                session.event(
+                    "tool_select",
+                    "ok",
+                    phase="maple_tool_markup_attached",
+                    policy_id="maple_tool_markup.v1",
+                )
+
+        # Insurance only: whole-completion structured_outputs (default off).
         tools_grammar = False
-        # Needle-off: constrain Maple via oMLX structured_outputs derived from tools.
-        if self.tool_path is None and _env_flag("EVPRTR_TOOLS_GRAMMAR", "1"):
-            maple_request = attach_tools_structured_outputs(request)
-            tools_grammar = maple_request is not request and bool(
-                maple_request.get("structured_outputs")
-            )
-            if tools_grammar:
+        if _env_flag("EVPRTR_TOOLS_GRAMMAR", "0"):
+            grammar_req = attach_tools_structured_outputs(maple_request)
+            if grammar_req is not maple_request and bool(
+                grammar_req.get("structured_outputs")
+            ):
+                maple_request = grammar_req
+                tools_grammar = True
                 session.event(
                     "tool_select",
                     "ok",

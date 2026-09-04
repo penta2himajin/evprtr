@@ -44,17 +44,43 @@ def test_json_schema_one_of_tool_names():
     schema = json_schema_from_openai_tools(_ls_read_tools())
     assert "oneOf" in schema
     names = []
+    message_branch = False
     for branch in schema["oneOf"]:
-        name_schema = branch["properties"]["name"]
+        props = branch.get("properties") or {}
+        if "message" in props and "name" not in props:
+            message_branch = True
+            continue
+        name_schema = props["name"]
         if "const" in name_schema:
             names.append(name_schema["const"])
         else:
             names.extend(name_schema.get("enum") or [])
     assert set(names) == {"ls", "read"}
-    ls_branch = next(b for b in schema["oneOf"] if b["properties"]["name"].get("const") == "ls")
+    assert message_branch
+    ls_branch = next(b for b in schema["oneOf"] if b.get("properties", {}).get("name", {}).get("const") == "ls")
     assert ls_branch["properties"]["arguments"]["required"] == ["path"]
 
 
+def test_promote_message_json_to_assistant_content():
+    upstream = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"message": "# evprtr\nentries: 12"},
+                        ensure_ascii=False,
+                    ),
+                },
+                "finish_reason": "stop",
+            }
+        ]
+    }
+    out = promote_tool_json_content(upstream)
+    msg = out["choices"][0]["message"]
+    assert msg.get("tool_calls") in (None, [])
+    assert msg["content"] == "# evprtr\nentries: 12"
+    assert out["choices"][0]["finish_reason"] == "stop"
 def test_attach_injects_when_missing_and_tools_present():
     req = {
         "messages": [{"role": "user", "content": "ls ."}],
