@@ -1,50 +1,35 @@
 # Findings: momij as Maple upstream (P0-E) — 2026-09-12
 
-## Setup
+## Setup (final smoke)
 
-- momij: `serve --model ~/models/deepgrove/maple-preview-2bit-mlx --model-id maple-preview --port 8742 --backend mlx` (release binary)
-- compositor: `EVPRTR_UPSTREAM_BASE_URL=http://127.0.0.1:8742/v1`, `EVPRTR_UPSTREAM_MODEL=maple-preview`, Needle off, maple-tools-primary + markup on, `:8741`
-- Pi: `--provider evprtr --model evprtr`
+- momij: release `serve --backend mlx --port 8744 --model-id maple-preview`
+  - tip: `a3fe719` on `cursor/omlx-dropin-api`
+- compositor: `:8741` → `http://127.0.0.1:8744/v1`, Needle off, markup primary, grammar off
+- Pi: `--provider evprtr --model evprtr --tools read,ls,grep`
 
 ## Results
 
 | Check | Result |
 |---|---|
-| `/healthz`, `/v1/models`, chat shape | OK |
-| Extra keys (`tools`, …) ignored (no 400) | OK (P0-B) |
-| Short markup → `<tool_call>` (momij direct / compositor) | OK (`pseudo_tool_promoted`) |
-| Pi readonly smoke (full Pi system ≈2.4k prompt toks) | **FAIL** — no tool_calls; degeneration |
-| `--backend seedless` | **Unusable** for E: Metal assert crash under load; generate quality garbage |
+| API drop-in (P0 A–D) | OK |
+| Short markup → `<tool_call>` | OK |
+| Long prompt collapse (`prompt_tokens ≳ 600`) | **Fixed** by SWA RoPE + sliding mask (`a3fe719`); see `docs/findings-long-prompt-swa-2026-09-12.md` in momij |
+| Pi readonly smoke (ls → grep → prose) | **PASS** (2026-09-12 evening) |
 
-### seedless
+### Pi smoke (final)
 
-First serve crashed mid-Pi-retry:
+- `toolCall ls` → ok
+- `toolCall grep Overview AGENTS.md` → ok
+- final text `## Overview`
+- Traces: `maple_tool_markup_attached`, `pseudo_tool_promoted` / `maple_tools_primary`; prompt_tokens ~4.7–4.9k
 
-`-[_MTLCommandEncoder dealloc]: failed assertion 'Command encoder released without endEncoding'` (exit 134)
+## Earlier failures (superseded)
 
-CLI `generate --backend seedless` also emits nonsense (`way way way-1-1-1`). Use **mlx** for agentic smoke until seedless is fixed.
+- seedless: Metal `endEncoding` assert + garbage quality (mitigated in `8b47021`; long-prompt parity still open)
+- mlx long Pi system: SWA offset clamp (fixed in `a3fe719`)
 
-### mlx + short tools
+## Still open
 
-Compositor request with one `ls` tool, short user text → `finish_reason=tool_calls`, trace `needle_via=pseudo_tool_promoted`, `maple_tool_markup_attached`.
-
-### mlx + Pi system
-
-Captured Pi body: `stream=true` (compositor shim → non-stream), `max_tokens=8192`, system ≈8931 chars (~2.2k toks) including “Available tools:” prose (not `<tools>` XML).
-
-Length sweep (Pi system prefix + markup suffix → momij mlx, `temperature=0`):
-
-| ~prompt_tokens | `<tool_call>` | Notes |
-|---|---|---|
-| 354 | yes | truncated system 500 chars |
-| 508 | no | coherent reasoning, no call |
-| ≥613 | no | loops / raw `<\|im_start\|>` text |
-
-Full Pi prompt never emits markup; compositor presents `maple_final_content`.
-
-## Verdict
-
-**API drop-in (P0 A–D contract) is enough for short harness-shaped calls.**  
-**P0-E Pi smoke is blocked on momij mlx long-prompt degeneration** (and seedless instability), not on evprtr wiring.
-
-Next: fix long-context / sampling / special-token stop on momij, or re-smoke when seedless is healthy; P1 grammar may help force `<tool_call>` once decode is constrained.
+- Default serve backend remains seedless — prefer **mlx** for agentic until seedless long-prompt parity is re-checked
+- xgrammar perf on long prompts (P1 insurance path)
+- Optional: attach `TOOLS_GRAMMAR` before markup strips `tools` (evprtr order)
