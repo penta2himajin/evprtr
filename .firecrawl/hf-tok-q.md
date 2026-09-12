@@ -1,0 +1,1 @@
+Yes, it mentions `<tool_call>`, `</tool_call>`, `<tool_response>`, and `</tool_response>`. It does not mention "tools" or "function calling" as literal strings.

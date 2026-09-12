@@ -1,0 +1,308 @@
+deepgrove/maple-preview - Hugging Face
+  URL: https://huggingface.co/deepgrove/maple-preview
+  Instructions to use deepgrove/maple-preview with libraries, inference providers, notebooks, and local apps. Follow these links to get started.
+
+What Is Maple-Preview? DeepGrove's Ternary-Weight Reasoning Model
+  URL: https://www.mindstudio.ai/blog/deepgrove-maple-preview-ternary-reasoning-model
+  Maple-Preview is an open-weight reasoning model from DeepGrove built around a ternary-weight, mixture-of-experts design.
+
+Show HN: Maple-Preview – Ternary 20B MoE running at 120 tok/s on a ...
+  URL: https://news.ycombinator.com/item?id=49173984
+  Models in this size range should aim for correct tool calling and avoiding hallucinations, not universal knowledge. (apparently they don't.) ...
+
+Maple-Preview | AI Model - There's An AI For That
+  URL: https://theresanaiforthat.com/model/maple-preview/
+  Maple-Preview is a 20B-parameter mixture-of-experts language model using ternary weights, built for efficient on-device reasoning.
+
+DeepGrove — Frontier Intelligence On Any Device
+  URL: https://deepgrove.ai/
+  DeepGrove is an independent AI research lab building efficient language models that run anywhere.
+
+Deepgrove's Maple-Preview inference engine boosts on-device AI ...
+  URL: https://www.linkedin.com/posts/mohanvel_edgeai-deepgroveai-machinelearning-activity-7490632686202658817-OL7a
+  Everything runs local: no API cost, no round-trip latency, no data leaving the machine. It's a small system, but the design decisions feel like ...
+
+Tool Calling - DeepInfra
+  URL: https://docs.deepinfra.com/chat/tool-calling
+  ## [​](https://docs.deepinfra.com/chat/tool-calling#step-1-send-tools-to-the-model)  Step 1: Send tools to the model
+```
+tools = [{\
+    "type": "function",\
+    "function": {\
+        "name": "get_current_weather",\
+        "description": "Get the current weather in a given location",\
+        "parameters": {\
+            "type": "object",\
+            "properties": {\
+                "location": {\
+                    "type": "string",\
+                    "description": "The city and state, e.g. San Francisco, CA"\
+                }\
+            },\
+            "required": ["location"]\
+        },\
+    }\
+}]
+
+messages = [{"role": "user", "content": "What is the weather in San Francisco?"}]
+
+response = client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-V4-Flash-0731",
+    messages=messages,
+    tools=tools,
+    tool_choice="auto",
+)
+tool_calls = response.choices[0].message.tool_calls
+for tool_call in tool_calls:
+    print(tool_call.model_dump())
+```
+
+```
+const tools = [{\
+  "type": "function",\
+  "function": {\
+    "name": "get_current_weather",\
+    "description": "Get the current weather in a given location",\
+    "parameters": {\
+      "type": "object",\
+      "properties": {\
+        "location": {\
+          "type": "string",\
+          "description": "The city and state, e.g. San Francisco, CA"\
+        }\
+      },\
+      "required": ["location"]\
+    },\
+  }\
+}];
+
+const messages = [{"role": "user", "content": "What is the weather in San Francisco?"}];
+
+const response = await client.chat.completions.create({
+  model: "deepseek-ai/DeepSeek-V4-Flash-0731",
+  messages: messages,
+  tools: tools,
+  tool_choice: "auto",
+});
+
+const tool_calls = response.choices[0].message.tool_calls;
+for (const tool_call of tool_calls) {
+  console.log(tool_call);
+}
+```
+
+```
+{'id': 'call_X0xYqdnoUonPJpQ6HEadxLHE', 'function': {'arguments': '{"location": "San Francisco"}', 'name': 'get_current_weather'}, 'type': 'function'}
+```
+
+## [​](https://docs.deepinfra.com/chat/tool-calling#step-2-execute-the-function-and-send-results-back)  Step 2: Execute the function and send results back
+```
+# Extend conversation with assistant's reply
+messages.append(response.choices[0].message)
+
+for tool_call in tool_calls:
+    function_name = tool_call.function.name
+    if function_name == "get_current_weather":
+        function_args = json.loads(tool_call.function.arguments)
+        function_response = get_current_weather(
+            location=function_args.get("location")
+        )
+
+    messages.append({
+        "tool_call_id": tool_call.id,
+        "role": "tool",
+        "content": function_response,
+    })
+
+# Get a new response from the model with function results
+second_response = client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-V4-Flash-0731",
+    messages=messages,
+    tools=tools,
+    tool_choice="auto",
+)
+
+print(second_response.choices[0].message.content)
+```
+
+```
+// Extend conversation with assistant's reply
+messages.push(response.choices[0].message);
+
+for (const tool_call of tool_calls) {
+  const function_name = tool_call.function.name;
+
+  if (function_name == "get_current_weather") {
+    const function_args = JSON.parse(tool_call.function.arguments);
+    const function_response = await get_current_weather(function_args.location);
+
+    messages.push({
+      "tool_call_id": tool_call.id,
+      "role": "tool",
+      "content": function_response,
+    });
+  }
+}
+
+const second_response = await client.chat.completions.create({
+  model: "deepseek-ai/DeepSeek-V4-Flash-0731",
+  messages: messages,
+  tools: tools,
+  tool_choice: "auto",
+});
+
+console.log(second_response.choices[0].message.content);
+```
+
+Tool Calls | DeepSeek API Docs
+  URL: https://api-docs.deepseek.com/guides/tool_calls/
+  # Tool Calls
+## Non-thinking Mode [​](https://api-docs.deepseek.com/guides/tool_calls/#non-thinking-mode)
+### Sample Code [​](https://api-docs.deepseek.com/guides/tool_calls/#sample-code)
+```python
+from openai import OpenAI
+
+def send_messages(messages):
+    response = client.chat.completions.create(
+        model="deepseek-v4-pro",
+        messages=messages,
+        tools=tools
+    )
+    return response.choices[0].message
+
+client = OpenAI(
+    api_key="<your api key>",
+    base_url="https://api.deepseek.com",
+)
+
+tools = [\
+    {\
+        "type": "function",\
+        "function": {\
+            "name": "get_weather",\
+            "description": "Get weather of a location, the user should supply a location first.",\
+            "parameters": {\
+                "type": "object",\
+                "properties": {\
+                    "location": {\
+                        "type": "string",\
+                        "description": "The city and state, e.g. San Francisco, CA",\
+                    }\
+                },\
+                "required": ["location"]\
+            },\
+        }\
+    },\
+]
+
+messages = [{"role": "user", "content": "How's the weather in Hangzhou, Zhejiang?"}]
+message = send_messages(messages)
+print(f"User>\t {messages[0]['content']}")
+
+tool = message.tool_calls[0]
+messages.append(message)
+
+messages.append({"role": "tool", "tool_call_id": tool.id, "content": "24℃"})
+message = send_messages(messages)
+print(f"Model>\t {message.content}")
+```
+
+## `strict` Mode (Beta) [​](https://api-docs.deepseek.com/guides/tool_calls/#strict-mode-beta)
+```json
+{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "strict": true,
+        "description": "Get weather of a location, the user should supply a location first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "The city and state, e.g. San Francisco, CA",
+                }
+            },
+            "required": ["location"],
+            "additionalProperties": false
+        }
+    }
+}
+```
+
+### Support Json Schema Types In `strict` Mode [​](https://api-docs.deepseek.com/guides/tool_calls/#support-json-schema-types-in-strict-mode)
+#### object [​](https://api-docs.deepseek.com/guides/tool_calls/#object)
+```json
+{
+    "type": "object",
+    "properties": {
+        "name": { "type": "string" },
+        "age": { "type": "integer" }
+    },
+    "required": ["name", "age"],
+    "additionalProperties": false
+}
+```
+
+#### string [​](https://api-docs.deepseek.com/guides/tool_calls/#string)
+```json
+{
+    "type": "object",
+    "properties": {
+        "user_email": {
+            "type": "string",
+            "description": "The user's email address",
+            "format": "email"
+        },
+        "zip_code": {
+            "type": "string",
+            "description": "Six digit postal code",
+            "pattern": "^\\d{6}$"
+        }
+    }
+}
+```
+
+#### number/integer [​](https://api-docs.deepseek.com/guides/tool_calls/#numberinteger)
+```text
+{
+    "type": "object",
+    "properties": {
+        "score": {
+            "type": "integer",
+            "description": "A number from 1-5, which represents your rating, the higher, the better",
+            "minimum": 1,
+            "maximum": 5
+        }
+    },
+    "required": ["score"],
+    "additionalProperties": false
+}
+```
+
+#### array [​](https://api-docs.deepseek.com/guides/tool_calls/#array)
+```json
+{
+    "type": "object",
+    "properties": {
+        "keywords": {
+            "type": "array",
+            "description": "Five keywords of the article, sorted by importance",
+            "items": {
+                "type": "string",
+                "description": "A concise and accurate keyword or phrase."
+            }
+        }
+    },
+    "required": ["keywords"],
+    "additionalProperties": false
+}
+```
+
+This AI runs 20B parameters at 120 tokens/sec on an iPhone. All of it ...
+  URL: https://www.instagram.com/reel/Dbpm9VmHezl/
+  No cloud connection, no API calls, no latency. The key is their ... Source: DeepGrove's Maple-Preview model card, 4 August 2026. August ...
+
+deepgrove/maple-preview-GGUF - Hugging Face
+  URL: https://huggingface.co/deepgrove/maple-preview-GGUF
+  Instructions to use deepgrove/maple-preview-GGUF with libraries, inference providers, notebooks, and local apps. Follow these links to get ...
