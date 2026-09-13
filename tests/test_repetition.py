@@ -29,3 +29,32 @@ def test_healthy_text_passes():
 
 def test_short_text_skipped():
     assert find_repetition("agent agent agent") is None
+
+
+def test_char_motif_ignores_whitespace_only_motifs():
+    # Markdown/code indentation is idiomatic, not model collapse: the live
+    # paired measurement fired char_motif "  " x10 on a healthy Python code
+    # block (20-space indent before a comment) and evprtr truncated the
+    # answer (1899 -> 1395 chars for the same upstream output).
+    text = (
+        "Recursion is a function calling itself.\n\n"
+        "```python\n"
+        "def factorial(n):\n"
+        "    if n == 0:               # base case\n"
+        "        return 1\n"
+        "    else:\n"
+        "                    # recursive case\n"
+        "        return n * factorial(n - 1)\n"
+        "```\n"
+        "The base case stops the recursion."
+    )
+    hit = find_repetition(text)
+    assert hit is None, f"healthy indentation must not fire, got {hit}"
+
+
+def test_char_motif_still_detects_non_whitespace_motifs():
+    text = "processing complete: " + ("tr" * 20) + " end"
+    hit = find_repetition(text)
+    assert hit is not None
+    assert hit.kind == "char_motif"
+    assert hit.detail["motif"].strip() != ""

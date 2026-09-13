@@ -77,7 +77,9 @@ def find_repetition(
                 run = 1
 
     match = _CHAR_MOTIF_RE.search(text)
-    if match:
+    if match and match.group(1).strip():
+        # Guard: whitespace-only motifs (e.g. markdown hard breaks or code
+        # indentation runs) are idiomatic formatting, not model collapse.
         hits.append(
             RepetitionHit(
                 kind="char_motif",
